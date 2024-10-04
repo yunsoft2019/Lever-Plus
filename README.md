@@ -1,6 +1,9 @@
 # Lever-LM
 Lever LM: Configuring In-Context Sequence to Lever Large Vision Language Models
 
+## News
+- [2024.09.26]🔥 Lever LM is accepted by Neurips2024.
+
 ## Prepare
 ```
 git clone 
