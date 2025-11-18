@@ -23,6 +23,7 @@ from utils import (
     get_lever_lm_path,
     init_lever_lm,
     load_ds,
+    parse_checkpoint_filename,
     vqa_postprocess,
 )
 
@@ -247,14 +248,69 @@ def inference_vqa(
 @hydra.main(version_base=None, config_path="./configs", config_name="inference.yaml")
 def main(cfg: DictConfig):
     logger.info(f"{cfg=}")
-    result_dir = os.path.join(
-        cfg.result_dir,
-        "icl_inference",
-        cfg.infer_model.name,
-        cfg.task.task_name,
-        cfg.ex_name,
-    )
-    result_json_path = os.path.join(result_dir, "metrics.json")
+    
+    # 构建新的输出路径格式: results/{数据集名}/icl_inference/{束搜索模型}_{选择器名}_infoscore_left_beam5_shot2_cand64_sample800_metrics.json
+    # 如果使用 LeverLMRetriever，从检查点文件名中提取信息
+    if cfg.test_lever_lm:
+        try:
+            lever_lm_path = get_lever_lm_path(cfg)
+            checkpoint_info = parse_checkpoint_filename(lever_lm_path)
+            
+            # 获取数据集名（去掉 _local 后缀）
+            dataset_name = cfg.dataset.name.replace('_local', '')
+            
+            # 获取束搜索模型名
+            infer_model_name = cfg.infer_model.name
+            
+            # 获取选择器名和训练参数
+            sampler_name = checkpoint_info.get('sampler_name')
+            training_params = checkpoint_info.get('training_params')
+            
+            if sampler_name and training_params:
+                # 构建新格式的路径
+                result_filename = f"{infer_model_name}_{sampler_name}_{training_params}_metrics.json"
+                result_dir = os.path.join(
+                    cfg.result_dir,
+                    dataset_name,
+                    "icl_inference",
+                )
+                result_json_path = os.path.join(result_dir, result_filename)
+                logger.info(f"使用新路径格式: {result_json_path}")
+            else:
+                # 如果无法解析检查点文件名，使用旧格式
+                logger.warning(f"无法从检查点文件名解析信息，使用旧路径格式")
+                result_dir = os.path.join(
+                    cfg.result_dir,
+                    "icl_inference",
+                    cfg.infer_model.name,
+                    cfg.task.task_name,
+                    cfg.ex_name,
+                )
+                result_json_path = os.path.join(result_dir, "metrics.json")
+        except Exception as e:
+            # 如果获取检查点路径失败，使用旧格式
+            logger.warning(f"获取检查点路径失败: {e}，使用旧路径格式")
+            result_dir = os.path.join(
+                cfg.result_dir,
+                "icl_inference",
+                cfg.infer_model.name,
+                cfg.task.task_name,
+                cfg.ex_name,
+            )
+            result_json_path = os.path.join(result_dir, "metrics.json")
+    else:
+        # 非 LeverLMRetriever 使用旧格式
+        result_dir = os.path.join(
+            cfg.result_dir,
+            "icl_inference",
+            cfg.infer_model.name,
+            cfg.task.task_name,
+            cfg.ex_name,
+        )
+        result_json_path = os.path.join(result_dir, "metrics.json")
+    
+    # 确保结果目录存在
+    os.makedirs(result_dir, exist_ok=True)
 
     test_data_num = cfg.test_data_num
     index_data_num = cfg.index_data_num

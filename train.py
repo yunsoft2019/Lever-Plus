@@ -7,6 +7,7 @@ import pytorch_lightning as pl
 from dotenv import load_dotenv
 from omegaconf import DictConfig
 from pytorch_lightning.callbacks import (
+    Callback,
     LearningRateMonitor,
     ModelCheckpoint,
     RichModelSummary,
@@ -19,6 +20,53 @@ from transformers import CLIPProcessor, get_cosine_schedule_with_warmup
 
 from lever_lm.utils import data_split, collate_fn
 from utils import load_ds
+
+
+# 简洁表格输出回调
+class SimpleTableLogger(Callback):
+    def __init__(self):
+        self.metrics_history = []
+        self.header_printed = False
+        self.val_count = 0
+        
+    def on_validation_end(self, trainer, pl_module):
+        # 获取指标（每次验证后都打印）
+        epoch = trainer.current_epoch
+        train_loss = trainer.callback_metrics.get('train_loss', float('nan'))
+        val_loss = trainer.callback_metrics.get('val_loss', float('nan'))
+        
+        # 跳过 sanity check（训练前的验证，train_loss 为 nan）
+        if trainer.sanity_checking:
+            return
+        
+        # 打印表头（只打印一次）
+        if not self.header_printed:
+            print("\n" + "="*50)
+            print(f"{'Epoch':>6} {'Step':>6} {'Train Loss':>12} {'Val Loss':>12}")
+            print("="*50)
+            self.header_printed = True
+        
+        # 计算当前步数（基于验证次数）
+        self.val_count += 1
+        step_indicator = f"{self.val_count % 4 if self.val_count % 4 != 0 else 4}/4"
+        
+        # 打印数据行（只在有有效 train_loss 时打印）
+        if not float('nan') == train_loss and not float('inf') == train_loss:
+            print(f"{epoch:6d} {step_indicator:>6} {train_loss:12.6f} {val_loss:12.6f}")
+        
+        # 保存历史记录
+        self.metrics_history.append({
+            'epoch': epoch,
+            'step': self.val_count,
+            'train_loss': float(train_loss),
+            'val_loss': float(val_loss)
+        })
+    
+    def on_train_end(self, trainer, pl_module):
+        print("="*50)
+        print("训练完成！")
+        print(f"最佳 Val Loss: {min([m['val_loss'] for m in self.metrics_history if not float('nan') == m['val_loss']]):.6f}")
+        print("="*50)
 
 
 # define the LightningModule
@@ -78,7 +126,10 @@ class ICDSeqDataModule(pl.LightningDataModule):
         dataset_name: The dataset Class name
         """
         super().__init__()
-        data_files_path = os.path.join(cfg.result_dir, "generated_data", cfg.data_files)
+        # 数据文件路径应该包含数据集子目录
+        # 从 cfg.dirpath 或 data_files 中提取数据集名称
+        dataset_name = cfg.get('dataset', {}).get('name', 'okvqa')
+        data_files_path = os.path.join(cfg.result_dir, dataset_name, "generated_data", cfg.data_files)
         with open(data_files_path, "r") as f:
             data = json.load(f)
         self.train_data_list, self.val_data_list = data_split(data, cfg.train_ratio)
@@ -123,38 +174,65 @@ class ICDSeqDataModule(pl.LightningDataModule):
 def main(cfg: DictConfig):
     pl.seed_everything(cfg.seed)
 
-    logger = WandbLogger(**cfg.wandb_args)
-    tl_model_cpk_callback = ModelCheckpoint(
-        filename="min_tl-{epoch}-{train_loss:.5f}-{val_loss:.5f}",
-        monitor="train_loss",
-        save_last=False,
-        save_top_k=1,
-        mode="min",
-        dirpath=cfg.dirpath,
-    )
+    # 根据配置决定是否使用 wandb
+    use_wandb = cfg.get('use_wandb', True)
+    use_simple_logger = cfg.get('use_simple_logger', False)
+    
+    if use_wandb:
+        logger = WandbLogger(**cfg.wandb_args)
+    else:
+        logger = False  # 禁用 logger
+    
+    # 只保存 val_loss 最优的模型（不保存 train_loss 最优的）
+    # 使用自定义文件名前缀（如果提供）或默认格式
+    checkpoint_filename_prefix = cfg.get('checkpoint_filename', 'best_model')
+    
     vl_model_cpk_callback = ModelCheckpoint(
-        filename="min_vl-{epoch}-{train_loss:.5f}-{val_loss:.5f}",
+        filename=f"{checkpoint_filename_prefix}_epoch={{epoch}}_train={{train_loss:.5f}}_val={{val_loss:.5f}}",
         monitor="val_loss",
-        save_last=True,
-        save_top_k=1,
+        save_last=False,  # 不保存最后一个 epoch（通常不是最优的）
+        save_top_k=1,     # 只保留最优的 1 个
         mode="min",
         dirpath=cfg.dirpath,
+        auto_insert_metric_name=False,
     )
-    trainer = pl.Trainer(
-        logger=logger,
-        callbacks=[
+    
+    # 准备回调列表
+    callbacks = [
+        vl_model_cpk_callback,  # 只保存 val_loss 最优的模型
+    ]
+    
+    # 根据配置选择进度条和日志方式
+    if use_simple_logger:
+        callbacks.append(SimpleTableLogger())
+    else:
+        callbacks.extend([
             LearningRateMonitor(),
             RichModelSummary(max_depth=2),
             RichProgressBar(),
-            tl_model_cpk_callback,
-            vl_model_cpk_callback,
-        ],
+        ])
+    
+    trainer = pl.Trainer(
+        logger=logger,
+        callbacks=callbacks,
+        enable_progress_bar=(not use_simple_logger),
         **cfg.trainer_args,
     )
     lever_lm = hydra.utils.instantiate(cfg.train.lever_lm)
     model = LeverLM(lever_lm, cfg.lr, cfg.weight_decay, cfg.warm_steps)
     data_module = ICDSeqDataModule(cfg)
-    trainer.fit(model, data_module)
+    
+    # 支持从检查点恢复训练
+    # 优先从环境变量读取（避免 Hydra 解析路径中的特殊字符）
+    ckpt_path = os.environ.get('RESUME_CKPT_PATH', None)
+    if not ckpt_path:
+        ckpt_path = cfg.get('ckpt_path', None)
+    
+    if ckpt_path and os.path.exists(ckpt_path):
+        print(f"从检查点恢复训练: {ckpt_path}")
+        trainer.fit(model, data_module, ckpt_path=ckpt_path)
+    else:
+        trainer.fit(model, data_module)
 
 
 if __name__ == "__main__":

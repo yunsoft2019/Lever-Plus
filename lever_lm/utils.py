@@ -16,7 +16,7 @@ from transformers import (
     CLIPVisionModelWithProjection,
 )
 
-from open_mmicl.interface import FlamingoInterface, IDEFICSInterface, LLMInterface
+from open_mmicl.interface import FlamingoInterface, IDEFICSInterface, LLMInterface, Qwen2VLInterface
 
 
 def init_interface(cfg, **kwargs):
@@ -51,6 +51,20 @@ def init_interface(cfg, **kwargs):
             image_field=cfg.task.image_field,
             label_field=cfg.task.output_column,
         )
+    elif "Qwen2.5-VL" in cfg.infer_model.name or "Qwen2VL" in cfg.infer_model.name:
+        return Qwen2VLInterface(
+            model_name=cfg.infer_model.model_name,
+            load_from_local=cfg.infer_model.load_from_local,
+            precision=cfg.precision,
+            device=kwargs["device"],
+            prompt_template=cfg.task.template,
+            column_token_map=cfg.task.column_token_map,
+            instruction=cfg.task.instruction,
+            icd_join_char=cfg.infer_model.icd_join_char,
+            image_field=cfg.task.image_field,
+            label_field=cfg.task.output_column,
+            system_prompt=cfg.infer_model.get("system_prompt", None),
+        )
     elif "Qwen" in cfg.infer_model.name:
         from open_mmicl.interface.llm_interface import LLMInterface
 
@@ -69,7 +83,7 @@ def init_interface(cfg, **kwargs):
 
     else:
         raise ValueError(
-            "infer_model name error, now only support ['flamingo, idefics']"
+            "infer_model name error, now only support ['flamingo, idefics, Qwen2.5-VL']"
         )
 
 

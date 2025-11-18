@@ -12,9 +12,10 @@ pip install -r requirements.txt
 ## .env 文件设置
 You should set the Environment varibles for dataset path and openflamingo path:
 ```
-CHECKPOINT_PATH="./openflamingo"  # the checkpoint path you want to save
+CHECKPOINT_PATH="./checkpoints"  # the checkpoint path you want to save
 COCO_PATH="/path/to/mscoco"
 VQAV2_PATH="/path/to/vqav2"
+OKVQA_PATH="/path/to/okvqa"  # OKVQA dataset path
 RESULT_DIR="/path/to/result"  # the dir to save result(checkpoint, inference metric, cache...)
 ```
 Flamingo checkpoint会自动下载在CHECKPOINT_PATH
@@ -65,12 +66,49 @@ unzip v2_Questions_Val_mscoco.zip
 
 
 # for preprepare the dataset.
-python open_mmicl/dataset_module/preprocess/vqav2_hf.py --root_path /path/to/vqav2/
+python lever_lm/dataset_module/preprocess/vqav2_hf.py --root_path ../data_sources/vqav2/
+python lever_lm/dataset_module/preprocess/vqav2_hf.py --root_path ../data_sources/okvqa/
 ```
 下载完之后，在`.env`中设置`VQAV2_PATH`环境变量。
 
 2. 或者你可以直接从huggingface上自动进行下载(需要使用`configs/dataset/vqav2_online.yaml`配置)
 
+
+### OKVQA
+OKVQA (Outside Knowledge VQA) 是一个需要外部知识才能回答的视觉问答数据集。数据集规模较小（训练集约9k样本），适合快速实验。
+
+1. 如果你使用`okvqa_local.yaml`，你需要手动下载数据集：
+
+```bash
+# 下载 OKVQA 数据集（注意：OKVQA 文件名没有 v2_ 前缀）
+mkdir -p /path/to/okvqa
+cd /path/to/okvqa
+
+# 从官网下载（推荐）
+wget https://okvqa.allenai.org/static/data/OpenEnded_mscoco_train2014_questions.json.zip
+wget https://okvqa.allenai.org/static/data/OpenEnded_mscoco_val2014_questions.json.zip
+wget https://okvqa.allenai.org/static/data/mscoco_train2014_annotations.json.zip
+wget https://okvqa.allenai.org/static/data/mscoco_val2014_annotations.json.zip
+
+# 解压文件
+unzip OpenEnded_mscoco_train2014_questions.json.zip
+unzip OpenEnded_mscoco_val2014_questions.json.zip
+unzip mscoco_train2014_annotations.json.zip
+unzip mscoco_val2014_annotations.json.zip
+
+# 预处理数据集（使用与 VQAv2 相同的预处理脚本，会自动检测数据集类型）
+cd /path/to/Lever-LM
+python lever_lm/dataset_module/preprocess/vqav2_hf.py --root_path /path/to/okvqa/
+```
+
+**注意**：
+- OKVQA 使用 COCO 2014 的图片，请确保 COCO 2014 数据集已下载
+- OKVQA 文件名**没有** `v2_` 前缀（与 VQAv2 不同）
+- 预处理脚本会自动识别并生成 `okvqa_hf/` 目录
+
+下载完之后，在`.env`中设置`OKVQA_PATH`环境变量。
+
+2. 或者你可以直接从huggingface上自动进行下载(需要使用`configs/dataset/okvqa_online.yaml`配置)
 
 
 #### 1. 构建Lever-LM训练数据集
@@ -80,15 +118,28 @@ python open_mmicl/dataset_module/preprocess/vqav2_hf.py --root_path /path/to/vqa
 bash scripts/generate_data.sh caption coco2017 "[0,1,2,3]" 
 
 # for vqav2
-bash scripts/generate_data.sh vqa vqav2_local "[0,1,2,3]"
+bash scripts/generate_data.sh vqa vqav2_local "[0]"
 # We support vqav2 dataset of hf. It will download the dataset automatically.
 bash scripts/generate_data.sh vqa vqav2_online "[0,1,2,3]"
+
+# for okvqa
+# 注意：OKVQA 数据集较小(9k样本)，scripts/generate_data.sh 默认 sample_num=5000 太大
+# 方法1: 使用 bash 脚本（会生成5000个样本，但实际只有9009个，脚本会自动处理）
+bash scripts/generate_data.sh vqa okvqa_local "[0]"
+bash scripts/generate_data.sh vqa okvqa_online "[0]"
+
+# 方法2: 使用 python 命令指定合适的 sample_num=800（推荐）
+python generate_data.py task=vqa dataset=okvqa_local sample_num=800 gpu_ids="[0]"
+python generate_data.py task=vqa dataset=okvqa_online sample_num=800 gpu_ids="[0]"
+
+# 或使用子集快速测试
+bash scripts/generate_data.sh vqa okvqa_local_sub "[0]"
 ```
 
 ##### `generate_data.py` 参数设置
 对应参数文件位于：`configs/inference.yaml`
 1. `infer_model`: infer_model的模型种类，目前支持Open falamingo和IDEFICS-9B。具体参数细节参考xxx
-2. `dataset`: 使用的数据集，可选值：`mscoco2017`, `mscoco2014`, `vqav2_local`, `vqav2_online`。具体参数细节参考xxx
+2. `dataset`: 使用的数据集，可选值：`mscoco2017`, `mscoco2014`, `vqav2_local`, `vqav2_online`, `okvqa_local`, `okvqa_online`, `okvqa_local_sub`。具体参数细节参考xxx
 3. `task`: 具体的任务种类，目前可选值`caption`和`vqa`。具体参数细节参考xxx
 4. `sampler`: 获取sub-supporting set的sampler方法，目前支持`img_sim_sampler`, `text_sim_sampler`, `rand_sampler`。具体参数细节参考xxx
 5. `beam_size`: 生成数据使用的beam size。
@@ -113,11 +164,16 @@ bash scripts/train_lever_lm.sh caption coco2017 1 query_img_icd_img_text
 bash scripts/train_lever_lm.sh vqa vqav2_local 1 query_img_text_icd_img_text
 # or use hf vqav2 dataset
 bash scripts/train_lever_lm.sh vqa vqav2_online 1 query_img_text_icd_img_text
+
+# for okvqa
+bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text
+# or use hf okvqa dataset
+bash scripts/train_lever_lm.sh vqa okvqa_online 1 query_img_text_icd_img_text
 ```
 
 ##### `train.py` 参数设置
 - `train`：选项包括`query_img_icd_idx`、`query_img_icd_img_text`、`query_img_icd_img`、`query_img_icd_text`、`query_img_text_icd_img_text`。在'query'之后的'img'表示在查询样本中添加图像信息。在'query'之后的'text'表示在查询样本中添加文本信息。'icd'同样适用于这个规则。
-- `dataset`: 使用的数据集，可选值：`mscoco2017`, `mscoco2014`, `vqav2_local`, `vqav2_online`。具体参数细节参考xxx
+- `dataset`: 使用的数据集，可选值：`mscoco2017`, `mscoco2014`, `vqav2_local`, `vqav2_online`, `okvqa_local`, `okvqa_online`, `okvqa_local_sub`。具体参数细节参考xxx
 - `task`: 具体的任务种类，目前可选值`caption`和`vqa`。具体参数细节参考xxx
 - `data_files`：指定在第一步生成的JSON数据文件的名称。
 - `trainer_args`：lightning训练器参数。具体参考[Pytorch Lightning](https://lightning.ai/docs/pytorch/stable/common/trainer.html#trainer-class-api)
@@ -137,6 +193,13 @@ bash scripts/inference.sh vqa vqav2_local 0 query_img_text_icd_img_text
 bash scripts/inference.sh vqa vqav2_online 0 query_img_text_icd_img_text
 # You can use a vqav2 sub-val set to validate the performance, which only contain 1w samples. 
 bash scripts/inference.sh vqa vqav2_local_sub 0 query_img_text_icd_img_text
+
+# for okvqa
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text
+# or use hf okvqa dataset
+bash scripts/inference.sh vqa okvqa_online 0 query_img_text_icd_img_text
+# You can use a okvqa sub-val set to validate the performance
+bash scripts/inference.sh vqa okvqa_local_sub 0 query_img_text_icd_img_text
 ```
 
 ##### Inference 参数设置
@@ -153,7 +216,7 @@ bash scripts/inference.sh vqa vqav2_local_sub 0 query_img_text_icd_img_text
 - `ex_name`：当前实验的名称，也是保存推理结果的文件夹名称。
 
 其他参数：
-- `dataset`: 使用的数据集，可选值：`mscoco2017`, `mscoco2014`, `vqav2_local`, `vqav2_online`。具体参数细节参考xxx
+- `dataset`: 使用的数据集，可选值：`mscoco2017`, `mscoco2014`, `vqav2_local`, `vqav2_online`, `okvqa_local`, `okvqa_online`, `okvqa_local_sub`。具体参数细节参考xxx
 - `task`：具体的任务种类，目前可选值`caption`和`vqa`。具体参数细节参考xxx
 - `infer_model`: infer_model的模型种类，目前支持Open falamingo和IDEFICS-9B。具体参数细节参考xxx
 - `index_data_num`：ICD训练集中的项目数量，-1表示全部。

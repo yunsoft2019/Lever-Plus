@@ -44,13 +44,13 @@ class ImgSimSampler(BaseSampler):
         self.bs = candidate_set_encode_bs
 
     def sample(self, anchor_set, train_ds):
-        if self.img_field_name not in train_ds.keys():
+        if self.img_field_name not in train_ds.column_names:
             raise ValueError(
-                f'dataset\'s keys {train_ds.keys()} do not include "{self.img_field_name}".'
+                f'dataset\'s columns {train_ds.column_names} do not include "{self.img_field_name}".'
             )
         if os.path.exists(self.feature_cache):
             logger.info(f"feature cache {self.feature_cache} exists, loding...")
-            features = torch.load(self.feature_cache)
+            features = torch.load(self.feature_cache, weights_only=False)
         else:
             features = encode_image(
                 train_ds,

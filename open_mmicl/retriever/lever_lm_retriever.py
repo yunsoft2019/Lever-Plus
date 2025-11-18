@@ -51,6 +51,46 @@ class LeverLMRetriever(BaseRetriever):
         self.icd_text_field = icd_text_field
         self.icd_image_field = icd_image_field
         self.reverse_seq = reverse_seq
+        self._cached_query_inputs = None  # 缓存预处理后的查询数据
+
+    def _prepare_query_inputs(self):
+        """一次性准备并缓存所有查询输入数据"""
+        if self._cached_query_inputs is not None:
+            return self._cached_query_inputs
+        
+        test_ds_ = self.test_ds.map()
+
+        def prepare(examples):
+            images = texts = None
+            if self.query_image_field:
+                images = [i for i in examples[self.query_image_field]]
+            if self.query_text_field:
+                texts = [i for i in examples[self.query_text_field]]
+
+            data_dict = self.processor(
+                images=images,
+                text=texts,
+                padding=True,
+                return_tensors="pt",
+            )
+            return data_dict
+
+        test_ds_.set_transform(prepare)
+        dataloader = DataLoader(
+            test_ds_,
+            batch_size=self.infer_batch_size,
+            shuffle=False,
+            num_workers=self.infer_num_workers,
+        )
+        
+        # 缓存所有批次的数据
+        cached_inputs = []
+        for query_input in tqdm(dataloader, desc="Loading query inputs", ncols=100):
+            query_input = {k: v.to(self.device) for k, v in query_input.items()}
+            cached_inputs.append(query_input)
+        
+        self._cached_query_inputs = cached_inputs
+        return self._cached_query_inputs
 
     def retrieve(self, ice_num) -> List[List[int]]:
         """Retrieve indices from the index dataset using the LeverLM model.
@@ -79,33 +119,10 @@ class LeverLMRetriever(BaseRetriever):
         bos_token_id = len(self.index_ds) + 1
         query_token_id = len(self.index_ds) + 2
 
-        test_ds_ = self.test_ds.map()
+        # 使用缓存的查询输入，避免重复加载
+        cached_query_inputs = self._prepare_query_inputs()
 
-        def prepare(examples):
-            images = texts = None
-            if self.query_image_field:
-                images = [i for i in examples[self.query_image_field]]
-            if self.query_text_field:
-                texts = [i for i in examples[self.query_text_field]]
-
-            data_dict = self.processor(
-                images=images,
-                text=texts,
-                padding=True,
-                return_tensors="pt",
-            )
-            return data_dict
-
-        test_ds_.set_transform(prepare)
-        dataloader = DataLoader(
-            test_ds_,
-            batch_size=self.infer_batch_size,
-            shuffle=False,
-            num_workers=self.infer_num_workers,
-        )
-
-        for query_input in tqdm(dataloader, ncols=100):
-            query_input = {k: v.to(self.device) for k, v in query_input.items()}
+        for query_input in tqdm(cached_query_inputs, desc=f"Generating with shot_num={ice_num}", ncols=100):
             bs = len(query_input[list(query_input.keys())[0]])
             init_icd_idx = torch.tensor(
                 [[bos_token_id, query_token_id] for _ in range(bs)]

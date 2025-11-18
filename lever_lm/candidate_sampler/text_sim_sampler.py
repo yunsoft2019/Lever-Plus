@@ -47,7 +47,7 @@ class TextSimSampler(BaseSampler):
     def sample(self, anchor_set, train_ds):
         if os.path.exists(self.feature_cache):
             logger.info(f"feature cache {self.feature_cache} exists, loding...")
-            features = torch.load(self.feature_cache)
+            features = torch.load(self.feature_cache, weights_only=False)
         else:
             features = encode_text(
                 train_ds,

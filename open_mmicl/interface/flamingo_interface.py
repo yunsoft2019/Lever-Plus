@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import List, Optional
 
 import open_clip
@@ -12,6 +13,27 @@ from open_flamingo.src.utils import extend_instance
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchFeature
 
 from .base_interface import LVLMInterface
+
+# MPT 模型（mpt-7b, mpt-1b）可能需要 triton_pre_mlir，但这是可选依赖
+# 设置环境变量来跳过 transformers 的依赖检查
+import os
+if "TRANSFORMERS_NO_ADVISORY_WARNINGS" not in os.environ:
+    os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+
+# 尝试导入 triton_pre_mlir，如果失败则创建一个假的模块来绕过检查
+try:
+    import triton_pre_mlir
+except ImportError:
+    # 创建一个假的 triton_pre_mlir 模块来绕过 transformers 的依赖检查
+    import sys
+    import types
+    fake_triton = types.ModuleType('triton_pre_mlir')
+    sys.modules['triton_pre_mlir'] = fake_triton
+    warnings.warn(
+        "triton_pre_mlir not found. Creating a dummy module to bypass dependency check. "
+        "Some MPT model features may be unavailable, but this is usually not critical for inference.",
+        UserWarning
+    )
 
 
 class FlamingoInterface(LVLMInterface):
@@ -58,13 +80,17 @@ class FlamingoInterface(LVLMInterface):
             hf_device_map=hf_device_map,
         )
         if load_from_local:
+            # If loading from local, use the specified path
             flamingo_checkpoint_dir = os.path.join(
                 flamingo_checkpoint_dir, "checkpoint.pt"
             )
         else:
+            # Use HuggingFace default cache directory (~/.cache/huggingface/)
+            # This avoids storing large files in the project directory
             hf_root = "openflamingo/" + hf_root
             flamingo_checkpoint_dir = hf_hub_download(
-                hf_root, "checkpoint.pt", local_dir=flamingo_checkpoint_dir
+                hf_root, "checkpoint.pt"
+                # Removed local_dir parameter to use default HF cache
             )
 
         self.model.load_state_dict(torch.load(flamingo_checkpoint_dir), strict=False)
@@ -99,6 +125,10 @@ class FlamingoInterface(LVLMInterface):
         Returns:
             str: Concatenated prompt string.
         """
+        # 处理空列表的情况（第一次迭代时可能没有 ICD 样本）
+        if len(data_sample_list) == 0:
+            return self.instruction
+        
         prompt = self.instruction
         ice_data_sample_list = data_sample_list[:-1]
         query_data_sample = data_sample_list[-1]

@@ -8,7 +8,7 @@ from loguru import logger
 from transformers import AutoProcessor
 
 from lever_lm.load_ds_utils import load_coco_ds, load_hf_ds, load_vqav2_ds
-from open_mmicl.interface import FlamingoInterface, IDEFICSInterface, LLMInterface
+from open_mmicl.interface import FlamingoInterface, IDEFICSInterface, LLMInterface, Qwen2VLInterface
 from open_mmicl.metrics.cider_calculator import compute_cider
 from open_mmicl.metrics.vqa_metrics import postprocess_vqa_generation
 
@@ -47,13 +47,23 @@ def load_ds(cfg, split=None):
 
 @torch.inference_mode()
 def get_info_score(
-    interface: Union[FlamingoInterface, IDEFICSInterface, LLMInterface],
+    interface: Union[FlamingoInterface, IDEFICSInterface, LLMInterface, Qwen2VLInterface],
     choosed_icd_seq_list: List,
     candidate_set: Dict,
     batch_size: int,
     split_token: Optional[str] = None,
     construct_order="left",
 ):
+    # Qwen2.5-VL doesn't support batch processing well due to:
+    # 1. Variable image sizes across samples
+    # 2. Different number of images per sample (different ICD counts)
+    # 3. High memory usage
+    # But we can use batch_size=4 for better performance if memory allows
+    if isinstance(interface, Qwen2VLInterface):
+        # Use batch_size=4 for better performance (can increase to 8 if memory allows)
+        batch_size = min(batch_size, 4)
+        logger.debug(f"Using batch_size={batch_size} for Qwen2.5-VL")
+    
     # 1. 计算P(y|x)
     # 1.1 拼接文本输入
     kwargs = dict(add_image_token=True)
@@ -137,6 +147,13 @@ def get_info_score(
         )
         sub_info_score = new_cond_prob - cond_prob
         info_score_list.append(sub_info_score)
+        
+        # Clear GPU cache periodically (every 10 batches) to prevent OOM
+        # This is especially important for Qwen2.5-VL which uses more memory
+        # But we don't clear it every batch to avoid performance degradation
+        if isinstance(interface, Qwen2VLInterface):
+            if len(info_score_list) % 10 == 0:
+                torch.cuda.empty_cache()
     return torch.cat(info_score_list)
 
 
@@ -260,7 +277,54 @@ def vqa_postprocess(text, model_name):
         return postprocess_vqa_generation(text).replace("\n", "")
 
 
+def parse_checkpoint_filename(checkpoint_path):
+    """从检查点文件名中解析训练参数
+    
+    Args:
+        checkpoint_path: 检查点文件路径
+        
+    Returns:
+        dict: 包含 sampler_name 和 training_params 的字典
+    """
+    import re
+    checkpoint_filename = os.path.basename(checkpoint_path)
+    logger.debug(f"解析检查点文件名: {checkpoint_filename}")
+    
+    # 检查点文件名格式: {model_name}_{sampler_name}_infoscore_left_beam5_shot2_cand64_sample{sample_num}[_...].ckpt
+    # 例如: flamingo_3B_RandSampler_infoscore_left_beam5_shot2_cand64_sample800_best_epoch=...
+    
+    # 提取 sampler_name (在第一个下划线和 infoscore 之间)
+    match = re.search(r'_(RandSampler|TextSimSampler|ImgSimSampler|MixSampler)_infoscore', checkpoint_filename)
+    sampler_name = match.group(1) if match else None
+    
+    # 提取训练参数部分 (从 infoscore 开始到 sample{num} 结束)
+    match = re.search(r'(infoscore_left_beam\d+_shot\d+_cand\d+_sample\d+)', checkpoint_filename)
+    training_params = match.group(1) if match else None
+    
+    if sampler_name:
+        logger.debug(f"解析到 sampler_name: {sampler_name}")
+    else:
+        logger.warning(f"无法从检查点文件名中解析 sampler_name: {checkpoint_filename}")
+    
+    if training_params:
+        logger.debug(f"解析到 training_params: {training_params}")
+    else:
+        logger.warning(f"无法从检查点文件名中解析 training_params: {checkpoint_filename}")
+    
+    return {
+        'sampler_name': sampler_name,
+        'training_params': training_params,
+    }
+
+
 def get_lever_lm_path(cfg):
+    # 优先从环境变量读取（避免 Hydra 解析路径中的特殊字符）
+    lever_lm_path = os.environ.get('LEVER_LM_CHECKPOINT_PATH', None)
+    
+    if lever_lm_path:
+        logger.info(f"从环境变量读取检查点路径: {lever_lm_path}")
+        return lever_lm_path
+    
     if cfg.lever_lm_path is None:
         logger.info(
             f"detect lever_lm_path is None, now try to find in {cfg.result_dir}/model_cpk/{cfg.ex_name}"
@@ -285,8 +349,57 @@ def get_lever_lm_path(cfg):
 
 
 def init_lever_lm(cfg, lever_lm_path):
+    # PyTorch 2.6+ 默认 weights_only=True，需要设置为 False 来加载包含 omegaconf 对象的检查点
+    checkpoint = torch.load(lever_lm_path, weights_only=False)
+    
+    # 从检查点中读取保存的超参数，特别是 index_ds_size
+    # 这样可以确保模型大小与检查点匹配
+    saved_index_ds_size = None
+    hyper_parameters = checkpoint.get("hyper_parameters", {})
+    if "cfg" in hyper_parameters:
+        saved_cfg = hyper_parameters["cfg"]
+        # 如果检查点中有保存的 dataset.train_ds_len，使用它来设置 index_ds_size
+        if "dataset" in saved_cfg and "train_ds_len" in saved_cfg.get("dataset", {}):
+            saved_index_ds_size = saved_cfg["dataset"]["train_ds_len"]
+            logger.info(f"从检查点超参数读取 index_ds_size: {saved_index_ds_size}")
+    
+    # 如果从超参数中没有读取到，尝试从权重形状推断
+    if saved_index_ds_size is None:
+        state_dict = checkpoint["state_dict"]
+        # 查找 lm_model.transformer.wte.weight 或 lever_lm.lm_model.transformer.wte.weight
+        wte_key = None
+        for key in state_dict.keys():
+            if "lm_model.transformer.wte.weight" in key:
+                wte_key = key
+                break
+        
+        if wte_key is not None:
+            wte_shape = state_dict[wte_key].shape
+            vocab_size = wte_shape[0]  # 第一个维度是 vocab_size
+            # GPT2LeverLM 中：vocab_size = index_ds_size + 3，所以需要减去 3
+            saved_index_ds_size = vocab_size - 3
+            logger.info(f"从检查点权重形状推断: vocab_size={vocab_size}, index_ds_size={saved_index_ds_size}")
+    
+    # 如果成功获取到 saved_index_ds_size，检查是否与当前配置匹配
+    if saved_index_ds_size is not None:
+        # 获取当前配置中的 train_ds_len
+        current_train_ds_len = getattr(cfg.dataset, "train_ds_len", None)
+        
+        # 如果当前配置中有 train_ds_len，检查是否匹配
+        if current_train_ds_len is not None and current_train_ds_len != saved_index_ds_size:
+            logger.warning(
+                f"检查点的 index_ds_size ({saved_index_ds_size}) 与当前配置的 train_ds_len ({current_train_ds_len}) 不匹配！"
+                f"将使用检查点的 index_ds_size ({saved_index_ds_size}) 来初始化模型。"
+            )
+        elif current_train_ds_len is not None and current_train_ds_len == saved_index_ds_size:
+            logger.info(f"检查点的 index_ds_size ({saved_index_ds_size}) 与当前配置的 train_ds_len ({current_train_ds_len}) 匹配。")
+        
+        # 修改配置以匹配检查点
+        cfg.train.lever_lm.index_ds_size = saved_index_ds_size
+        logger.info(f"使用 index_ds_size: {saved_index_ds_size} 来初始化模型")
+    
     lever_lm = hydra.utils.instantiate(cfg.train.lever_lm)
-    state_dict = torch.load(lever_lm_path)["state_dict"]
+    state_dict = checkpoint["state_dict"]
     state_dict = {k.replace("lever_lm.", ""): v for k, v in state_dict.items()}
     lever_lm.load_state_dict(state_dict)
     processor = AutoProcessor.from_pretrained(cfg.train.lever_lm.clip_name)

@@ -110,6 +110,27 @@ def load_vqav2_ds(
         ds.pop("test", None)
         ds.pop("testdev", None)
         ds = ds.sort("question_id")
+    
+    # 处理 OKVQA 数据集（没有 multiple_choice_answer 字段）
+    # 从 answers 列表中选择出现次数最多的作为 multiple_choice_answer
+    if "multiple_choice_answer" not in ds.column_names:
+        def add_multiple_choice_answer(batch):
+            from collections import Counter
+            multiple_choice_answers = []
+            for answers_list in batch["answers"]:
+                # answers_list 格式: [{"answer": "yes", "answer_confidence": "yes"}, ...]
+                answer_texts = [ans["answer"] for ans in answers_list]
+                # 统计出现次数最多的答案
+                if answer_texts:
+                    most_common = Counter(answer_texts).most_common(1)[0][0]
+                else:
+                    most_common = ""
+                multiple_choice_answers.append(most_common)
+            batch["multiple_choice_answer"] = multiple_choice_answers
+            return batch
+        
+        ds = ds.map(add_multiple_choice_answer, batched=True, num_proc=12)
+    
     ds = ds.rename_columns({"multiple_choice_answer": "answer"})
 
     def gene_qa_text_field(batch_data):

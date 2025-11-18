@@ -6,6 +6,10 @@ requirements_repo
 .vscode
 # Byte-compiled / optimized / DLL files
 __pycache__/
+
+# Project specific directories to ignore
+checkpoints/
+results/
 *.py[cod]
 *$py.class
 

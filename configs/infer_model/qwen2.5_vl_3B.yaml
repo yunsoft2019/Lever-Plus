@@ -1,0 +1,26 @@
+name: Qwen2.5-VL-3B-Instruct
+
+model_name: Qwen/Qwen2.5-VL-3B-Instruct
+load_from_local: false
+
+caption_prompt_template: "Output:<X>"
+vqa_prompt_template: "Question:<Q> Short answer:<A>"
+
+caption_instruction: ""
+vqa_instruction: ""
+
+# System prompt for Qwen2.5-VL
+system_prompt: "In the upcoming task, you will see four sets of dialogues, each containing two roles: user and assistant. The user is the questioner, who provides an image and asks a question based on it; the assistant is the responder, who answers according to the image and question provided by the user. Afterward, you will receive an image and a question from the user. Please act as the assistant and answer based on the four previous dialogue sets and your own knowledge. Strictly follow the answering format: if the examples use only one or two keywords, your reply must also use only one or two keywords; if the examples contain no more than three tokens, your reply must not exceed three tokens either."
+
+icd_join_char: "<|endofchunk|>"
+
+caption_split_token: "Output:"
+vqa_split_token: "Short answer:"
+
+init_device: "cuda"
+
+# Qwen2.5-VL batch size configuration
+# This will be used as the maximum batch size (will be capped at 8 in code)
+# Set to 4 for better performance while avoiding OOM
+batch_size: 4
+

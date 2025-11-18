@@ -130,6 +130,10 @@ def gen_data(
         + f"_rank:{rank}_({subset_start}, {subset_end}).json"
     )
     save_path = save_path.replace(os.path.basename(save_path), sub_res_basename)
+    
+    # Log the save path for debugging
+    logger.info(f"Rank: {rank} will save to: {save_path}")
+    
     if os.path.exists(save_path):
         final_res.update(json.load(open(save_path)))
         logger.info(
@@ -157,8 +161,13 @@ def gen_data(
             candidate_set=candidate_set,
         )
         final_res.update(res)
-        with open(save_path, "w") as f:
-            json.dump(final_res, f)
+        # Save after each sample for checkpoint/resume capability
+        try:
+            with open(save_path, "w") as f:
+                json.dump(final_res, f)
+        except Exception as e:
+            logger.error(f"Rank: {rank} failed to save to {save_path}: {e}")
+            raise
     return
 
 
@@ -171,16 +180,24 @@ def main(cfg: DictConfig):
     cache_dir = cfg.sampler.cache_dir
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
-    save_dir = os.path.join(cfg.result_dir, "generated_data")
+    
+    # Get dataset name (remove _local suffix if present)
+    dataset_name = cfg.dataset.name.replace('_local', '')
+    
+    # Build save directory with dataset name: result_dir/{dataset_name}/generated_data
+    save_dir = os.path.join(cfg.result_dir, dataset_name, "generated_data")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     sub_proc_save_dir = os.path.join(save_dir, "sub_proc_data")
     if not os.path.exists(sub_proc_save_dir):
         os.makedirs(sub_proc_save_dir)
 
+    # Sanitize model name for filename (replace special characters)
+    model_name_safe = cfg.infer_model.name.replace(".", "_").replace("/", "_").replace(" ", "_")
+    
     save_file_name = (
         f"{cfg.task.task_name}-{cfg.dataset.name}-"
-        f"{cfg.infer_model.name}-{cfg.sampler.sampler_name}-scorer:{cfg.scorer}-construct_order:{cfg.construct_order}-"
+        f"{model_name_safe}-{cfg.sampler.sampler_name}-scorer:{cfg.scorer}-construct_order:{cfg.construct_order}-"
         f"beam_size:{cfg.beam_size}-few_shot:{cfg.few_shot_num}-"
         f"candidate_num:{cfg.sampler.candidate_num}-sample_num:{cfg.sample_num}.json"
     )

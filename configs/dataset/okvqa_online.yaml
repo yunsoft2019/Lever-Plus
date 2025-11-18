@@ -1,0 +1,11 @@
+version: hub
+name: okvqa
+train_ds_len: 9009  # OKVQA 训练集只有 9009 个样本，建议 sample_num 设置为 800-1000
+
+# use for eval
+val_ques_path: ${oc.env:OKVQA_PATH}/OpenEnded_mscoco_val2014_questions.json
+val_ann_path: ${oc.env:OKVQA_PATH}/mscoco_val2014_annotations.json
+
+train_ques_path: ${oc.env:OKVQA_PATH}/OpenEnded_mscoco_train2014_questions.json
+train_ann_path: ${oc.env:OKVQA_PATH}/mscoco_train2014_annotations.json
+

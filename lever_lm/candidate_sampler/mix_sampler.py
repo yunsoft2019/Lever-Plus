@@ -90,12 +90,12 @@ class MixSimSampler(BaseSampler):
         )
 
     @torch.inference_mode()
-    def sample(self, train_ds):
-        final_res = {k: [] for k in self.anchor_idx_list}
-        rand_res = self.rand_sampler.sample(train_ds)
-        img_sim_res = self.img_sim_sampler.sample(train_ds)
-        text_sim_res = self.text_sim_sampler.sample(train_ds)
-        for k in self.anchor_idx_list:
+    def sample(self, anchor_set, train_ds):
+        final_res = {k: [] for k in anchor_set}
+        rand_res = self.rand_sampler.sample(anchor_set, train_ds)
+        img_sim_res = self.img_sim_sampler.sample(anchor_set, train_ds)
+        text_sim_res = self.text_sim_sampler.sample(anchor_set, train_ds)
+        for k in anchor_set:
             final_res[k].extend(rand_res[k])
             final_res[k].extend(img_sim_res[k])
             final_res[k].extend(text_sim_res[k])
