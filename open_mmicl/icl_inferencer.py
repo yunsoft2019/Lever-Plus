@@ -31,12 +31,35 @@ class ICLInferecer:
         self.test_ds = test_ds
         self.generation_kwargs = generation_kwargs
         self.other_save_field = other_save_field
-        self.num_workers = num_workers
+        # 如果使用 CUDA，将 num_workers 设置为 0，避免 CUDA 在多进程中的初始化问题
+        # 检查 device 是否为 CUDA（支持字符串和 torch.device 对象）
+        if hasattr(interface, 'device'):
+            device_str = str(interface.device)
+            if 'cuda' in device_str.lower():
+                if num_workers > 0:
+                    logger.warning(f"CUDA device detected ({device_str}), setting num_workers=0 to avoid CUDA multiprocessing issues")
+                self.num_workers = 0
+            else:
+                self.num_workers = num_workers
+                logger.debug(f"Non-CUDA device detected ({device_str}), using num_workers={num_workers}")
+        else:
+            # 如果没有 device 属性，使用传入的 num_workers
+            logger.warning(f"Interface has no 'device' attribute, using num_workers={num_workers}")
+            self.num_workers = num_workers
         self.num_proc = num_proc
         self.preprocessor_bs = preprocessor_bs
         self.batch_size = batch_size
         self.output_json_filepath = output_json_filepath
         self.output_json_filename = output_json_filename
+    
+    def _get_safe_num_workers(self):
+        """获取安全的 num_workers 值，确保在使用 CUDA 时返回 0"""
+        if hasattr(self.interface, 'device'):
+            device_str = str(self.interface.device)
+            if 'cuda' in device_str.lower() and self.num_workers > 0:
+                logger.warning(f"CUDA device detected ({device_str}), forcing num_workers=0 for DataLoader")
+                return 0
+        return self.num_workers
 
     @torch.inference_mode()
     def inference(
@@ -83,24 +106,87 @@ class ICLInferecer:
             input_tensor_dict = self.interface.prepare_input(
                 prompts, is_last_for_generation=True
             )
-            return input_tensor_dict
+            # Convert BatchFeature to dict to avoid DataLoader issues with image_grid_thw
+            # DataLoader may incorrectly process BatchFeature, causing image_grid_thw shape issues
+            if hasattr(input_tensor_dict, 'data'):
+                result = dict(input_tensor_dict.data)
+            elif isinstance(input_tensor_dict, dict):
+                result = input_tensor_dict
+            else:
+                result = dict(input_tensor_dict)
+            
+            # Debug: Check image_grid_thw shape before returning
+            if 'image_grid_thw' in result:
+                logger.debug(f"image_grid_thw shape in prepare_input_map (before DataLoader): {result['image_grid_thw'].shape}")
+            
+            return result
 
         test_ds.set_transform(prepare_input_map)
+        safe_num_workers = self._get_safe_num_workers()
         dataloader = DataLoader(
             test_ds,
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=safe_num_workers,
             shuffle=False,
         )
 
         # 4. Inference for prompts in each batch
         logger.info("Starting inference process...")
+        
+        # Show beam search configuration if enabled
+        num_beams = self.generation_kwargs.get('num_beams', 1)
+        max_new_tokens = self.generation_kwargs.get('max_new_tokens', 'N/A')
+        if num_beams > 1:
+            logger.info(f"束搜索配置: num_beams={num_beams}, max_new_tokens={max_new_tokens}, length_penalty={self.generation_kwargs.get('length_penalty', 0.0)}")
 
-        for data in tqdm(dataloader, ncols=100):
+        for data in tqdm(dataloader, ncols=100, desc="推理中" if num_beams == 1 else f"束搜索推理 (beams={num_beams})"):
             # 5-1. Inference with local model
-
+            # Move to device
             data = {k: v.to(self.interface.device) for k, v in data.items()}
+            
+            # Fix: DataLoader adds batch dimension to tensors
+            # For Qwen2.5-VL, image_grid_thw should be [num_images, 3], not [batch_size, num_images, 3]
+            # Remove batch dimension if present and update image_nums accordingly
+            if 'image_grid_thw' in data:
+                original_shape = data['image_grid_thw'].shape
+                logger.debug(f"image_grid_thw shape before fix (in inferencer): {original_shape}")
+                
+                # Handle different DataLoader collation scenarios
+                if data['image_grid_thw'].dim() == 3 and data['image_grid_thw'].shape[0] == 1:
+                    # Remove batch dimension: [1, num_images, 3] -> [num_images, 3]
+                    data['image_grid_thw'] = data['image_grid_thw'].squeeze(0)
+                    logger.debug(f"Fixed image_grid_thw: {original_shape} -> {data['image_grid_thw'].shape}")
+                    # Update image_nums if present
+                    if 'image_nums' in data:
+                        if isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() == 1:
+                            # Keep as is, it's already correct for single batch
+                            pass
+                        elif isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() > 1:
+                            # Take first element for single batch
+                            data['image_nums'] = data['image_nums'][0:1]
+                        elif isinstance(data['image_nums'], list) and len(data['image_nums']) > 0:
+                            data['image_nums'] = torch.tensor([data['image_nums'][0]], dtype=torch.long)
+                    else:
+                        # Calculate image_nums from image_grid_thw
+                        num_images = data['image_grid_thw'].shape[0]
+                        data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+                elif data['image_grid_thw'].dim() == 2:
+                    # Ensure image_nums is set correctly
+                    if 'image_nums' not in data:
+                        num_images = data['image_grid_thw'].shape[0]
+                        data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+                    elif isinstance(data['image_nums'], torch.Tensor):
+                        # Ensure image_nums is 1D tensor with correct dtype
+                        if data['image_nums'].dim() > 1:
+                            data['image_nums'] = data['image_nums'].flatten()
+                        if data['image_nums'].dtype != torch.long:
+                            data['image_nums'] = data['image_nums'].long()
+                    logger.debug(f"Final image_grid_thw shape: {data['image_grid_thw'].shape}")
+                    logger.debug(f"Final image_nums: {data['image_nums']}")
+            
             prompt_len = int(data["attention_mask"].shape[1])
+            
+            # Standard Qwen2.5-VL inference format: model.generate(**inputs, ...)
             outputs = self.interface.generate(
                 **data,
                 eos_token_id=self.interface.tokenizer.eos_token_id,
@@ -181,24 +267,87 @@ class ICLInferecer:
             input_tensor_dict = self.interface.prepare_input(
                 prompts, is_last_for_generation=True
             )
-            return input_tensor_dict
+            # Convert BatchFeature to dict to avoid DataLoader issues with image_grid_thw
+            # DataLoader may incorrectly process BatchFeature, causing image_grid_thw shape issues
+            if hasattr(input_tensor_dict, 'data'):
+                result = dict(input_tensor_dict.data)
+            elif isinstance(input_tensor_dict, dict):
+                result = input_tensor_dict
+            else:
+                result = dict(input_tensor_dict)
+            
+            # Debug: Check image_grid_thw shape before returning
+            if 'image_grid_thw' in result:
+                logger.debug(f"image_grid_thw shape in prepare_input_map (before DataLoader): {result['image_grid_thw'].shape}")
+            
+            return result
 
         test_ds.set_transform(prepare_input_map)
+        safe_num_workers = self._get_safe_num_workers()
         dataloader = DataLoader(
             test_ds,
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=safe_num_workers,
             shuffle=False,
         )
 
         # 4. Inference for prompts in each batch
         logger.info("Starting inference process...")
+        
+        # Show beam search configuration if enabled
+        num_beams = self.generation_kwargs.get('num_beams', 1)
+        max_new_tokens = self.generation_kwargs.get('max_new_tokens', 'N/A')
+        if num_beams > 1:
+            logger.info(f"束搜索配置: num_beams={num_beams}, max_new_tokens={max_new_tokens}, length_penalty={self.generation_kwargs.get('length_penalty', 0.0)}")
 
-        for data in tqdm(dataloader, ncols=100):
+        for data in tqdm(dataloader, ncols=100, desc="推理中" if num_beams == 1 else f"束搜索推理 (beams={num_beams})"):
             # 5-1. Inference with local model
-
+            # Move to device
             data = {k: v.to(self.interface.device) for k, v in data.items()}
+            
+            # Fix: DataLoader adds batch dimension to tensors
+            # For Qwen2.5-VL, image_grid_thw should be [num_images, 3], not [batch_size, num_images, 3]
+            # Remove batch dimension if present and update image_nums accordingly
+            if 'image_grid_thw' in data:
+                original_shape = data['image_grid_thw'].shape
+                logger.debug(f"image_grid_thw shape before fix (in inferencer): {original_shape}")
+                
+                # Handle different DataLoader collation scenarios
+                if data['image_grid_thw'].dim() == 3 and data['image_grid_thw'].shape[0] == 1:
+                    # Remove batch dimension: [1, num_images, 3] -> [num_images, 3]
+                    data['image_grid_thw'] = data['image_grid_thw'].squeeze(0)
+                    logger.debug(f"Fixed image_grid_thw: {original_shape} -> {data['image_grid_thw'].shape}")
+                    # Update image_nums if present
+                    if 'image_nums' in data:
+                        if isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() == 1:
+                            # Keep as is, it's already correct for single batch
+                            pass
+                        elif isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() > 1:
+                            # Take first element for single batch
+                            data['image_nums'] = data['image_nums'][0:1]
+                        elif isinstance(data['image_nums'], list) and len(data['image_nums']) > 0:
+                            data['image_nums'] = torch.tensor([data['image_nums'][0]], dtype=torch.long)
+                    else:
+                        # Calculate image_nums from image_grid_thw
+                        num_images = data['image_grid_thw'].shape[0]
+                        data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+                elif data['image_grid_thw'].dim() == 2:
+                    # Ensure image_nums is set correctly
+                    if 'image_nums' not in data:
+                        num_images = data['image_grid_thw'].shape[0]
+                        data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+                    elif isinstance(data['image_nums'], torch.Tensor):
+                        # Ensure image_nums is 1D tensor with correct dtype
+                        if data['image_nums'].dim() > 1:
+                            data['image_nums'] = data['image_nums'].flatten()
+                        if data['image_nums'].dtype != torch.long:
+                            data['image_nums'] = data['image_nums'].long()
+                    logger.debug(f"Final image_grid_thw shape: {data['image_grid_thw'].shape}")
+                    logger.debug(f"Final image_nums: {data['image_nums']}")
+            
             prompt_len = int(data["attention_mask"].shape[1])
+            
+            # Standard Qwen2.5-VL inference format: model.generate(**inputs, ...)
             outputs = self.interface.generate(
                 **data,
                 eos_token_id=self.interface.tokenizer.eos_token_id,
@@ -290,10 +439,11 @@ class ICLInferecer:
                 return input_tensor_dict
 
             test_ds.set_transform(prepare_input_map)
+            safe_num_workers = self._get_safe_num_workers()
             dataloader = DataLoader(
                 test_ds,
                 batch_size=self.batch_size,
-                num_workers=self.num_workers,
+                num_workers=safe_num_workers,
                 shuffle=False,
             )
             # 4. Inference for prompts in each batch

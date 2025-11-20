@@ -61,18 +61,15 @@ class Qwen2VLInterface(LVLMInterface):
             "local_files_only": load_from_local,
         }
         
-        # Only use device_map="auto" if not loading from local and CUDA is available
-        if not load_from_local and torch.cuda.is_available():
-            model_kwargs["device_map"] = "auto"
-        
+        # Use the specified device instead of device_map="auto" to avoid auto-distribution across all GPUs
+        # This ensures the model only uses the GPU specified in gpu_ids parameter
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_name,
             **model_kwargs
         )
         
-        # Move to device if device_map was not used
-        if "device_map" not in model_kwargs:
-            self.model = self.model.to(self.device)
+        # Move model to the specified device
+        self.model = self.model.to(self.device)
         self.model.eval()
         
         self.tokenizer = self.processor.tokenizer
@@ -299,6 +296,15 @@ class Qwen2VLInterface(LVLMInterface):
         # Pad batch inputs to same length (if multiple items)
         if len(batch_inputs) == 1:
             inputs = batch_inputs[0]
+            # For Qwen2.5-VL, image_nums is needed for beam search expansion
+            # Calculate image_nums from image_grid_thw shape if not present
+            if 'image_grid_thw' in inputs:
+                if 'image_nums' not in inputs:
+                    # image_grid_thw shape is [num_images, 3]
+                    num_images = inputs['image_grid_thw'].shape[0]
+                    inputs['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+                logger.debug(f"image_grid_thw shape after single batch: {inputs['image_grid_thw'].shape}")
+                logger.debug(f"image_nums: {inputs['image_nums']}")
         else:
             # Get max sequence length
             max_seq_len = max(inp["input_ids"].shape[1] for inp in batch_inputs)
@@ -326,37 +332,55 @@ class Qwen2VLInterface(LVLMInterface):
                             padded_tensors.append(padded)
                         padded_inputs[key] = torch.cat(padded_tensors, dim=0)
                     else:
-                        # For other tensors (like pixel_values), stack them
-                        # But handle variable sizes carefully
-                        try:
+                        # Special handling for Qwen2.5-VL image_grid_thw
+                        # image_grid_thw should be concatenated along dim=0 (flatten all images)
+                        if key == 'image_grid_thw':
+                            # Concatenate all image_grid_thw tensors along dim=0
                             padded_inputs[key] = torch.cat([inp[key] for inp in batch_inputs], dim=0)
-                        except RuntimeError:
-                            # If shapes don't match, pad to max size
-                            max_shape = max(inp[key].shape for inp in batch_inputs)
-                            padded_tensors = []
-                            for inp in batch_inputs:
-                                tensor = inp[key]
-                                # Pad to max_shape if needed
-                                if tensor.shape != max_shape:
-                                    # Create padding
-                                    pad_dims = []
-                                    for i, (s, m) in enumerate(zip(tensor.shape, max_shape)):
-                                        pad_dims.extend([0, m - s])
-                                    pad_dims = pad_dims[::-1]  # Reverse for F.pad format
-                                    tensor = torch.nn.functional.pad(tensor, pad_dims)
-                                padded_tensors.append(tensor)
-                            padded_inputs[key] = torch.stack(padded_tensors, dim=0)
+                        else:
+                            # For other tensors (like pixel_values), stack them
+                            # But handle variable sizes carefully
+                            try:
+                                padded_inputs[key] = torch.cat([inp[key] for inp in batch_inputs], dim=0)
+                            except RuntimeError:
+                                # If shapes don't match, pad to max size
+                                max_shape = max(inp[key].shape for inp in batch_inputs)
+                                padded_tensors = []
+                                for inp in batch_inputs:
+                                    tensor = inp[key]
+                                    # Pad to max_shape if needed
+                                    if tensor.shape != max_shape:
+                                        # Create padding
+                                        pad_dims = []
+                                        for i, (s, m) in enumerate(zip(tensor.shape, max_shape)):
+                                            pad_dims.extend([0, m - s])
+                                        pad_dims = pad_dims[::-1]  # Reverse for F.pad format
+                                        tensor = torch.nn.functional.pad(tensor, pad_dims)
+                                    padded_tensors.append(tensor)
+                                padded_inputs[key] = torch.stack(padded_tensors, dim=0)
                 else:
                     # For non-tensor values, keep as list
                     padded_inputs[key] = [inp[key] for inp in batch_inputs]
             
             inputs = padded_inputs
+            # For Qwen2.5-VL, image_nums is needed for beam search expansion
+            # Calculate image_nums from each batch item's image_grid_thw shape if not present
+            if 'image_grid_thw' in inputs:
+                if 'image_nums' not in inputs:
+                    # Calculate image_nums for each item in the batch
+                    # Each item in batch_inputs has its own image_grid_thw
+                    image_nums_list = [inp['image_grid_thw'].shape[0] for inp in batch_inputs]
+                    inputs['image_nums'] = torch.tensor(image_nums_list, dtype=torch.long)
+                logger.debug(f"image_grid_thw shape after batch padding: {inputs['image_grid_thw'].shape}")
+                logger.debug(f"image_nums: {inputs['image_nums']}")
         
         # Move to device and return as BatchFeature (consistent with Flamingo interface)
         for key in inputs.keys():
             if isinstance(inputs[key], torch.Tensor):
                 inputs[key] = inputs[key].to(self.device)
         
-        # Return as BatchFeature to be consistent with other interfaces
-        return BatchFeature(data=inputs)
+        # Return as dict for Qwen2.5-VL to avoid DataLoader batch processing issues
+        # DataLoader may incorrectly process BatchFeature, causing image_grid_thw shape issues
+        # Returning dict ensures proper handling of image_grid_thw shape [num_images, 3]
+        return inputs
 

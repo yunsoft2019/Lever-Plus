@@ -106,8 +106,33 @@ class BaseInterface:
         raise NotImplemented
 
     def generate(self, *args, **kwargs):
+        # Keep image_nums for Qwen2.5-VL beam search expansion
+        # image_nums is needed by Qwen2.5-VL's _expand_dict_for_generation_visual
+        # to correctly split image_grid_thw during beam search
+        
+        # Debug: Check image_grid_thw shape before passing to model.generate
+        if 'image_grid_thw' in kwargs:
+            from loguru import logger
+            logger.debug(f"image_grid_thw shape before generate: {kwargs['image_grid_thw'].shape}")
+            logger.debug(f"image_grid_thw value: {kwargs['image_grid_thw']}")
+            # Check if input_ids is present to understand batch structure
+            if 'input_ids' in kwargs:
+                logger.debug(f"input_ids shape: {kwargs['input_ids'].shape}")
+        
         with self.autocast_context:
-            return self.model.generate(*args, **kwargs)
+            try:
+                return self.model.generate(*args, **kwargs)
+            except RuntimeError as e:
+                # If error is about image_grid_thw split, add more debug info
+                if 'split_with_sizes' in str(e) and 'image_grid_thw' in str(e):
+                    from loguru import logger
+                    logger.error(f"Error splitting image_grid_thw: {e}")
+                    if 'image_grid_thw' in kwargs:
+                        logger.error(f"image_grid_thw shape: {kwargs['image_grid_thw'].shape}")
+                        logger.error(f"image_grid_thw: {kwargs['image_grid_thw']}")
+                    if 'input_ids' in kwargs:
+                        logger.error(f"input_ids shape: {kwargs['input_ids'].shape}")
+                raise
 
     def __call__(self, model_input):
         with self.autocast_context:
