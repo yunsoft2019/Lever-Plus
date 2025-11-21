@@ -275,6 +275,12 @@ def vqa_postprocess(text, model_name):
         return postprocess_vqa_generation(text)
     elif "idefics" in model_name:
         return postprocess_vqa_generation(text).replace("\n", "")
+    elif "qwen" in model_name.lower() or "Qwen" in model_name:
+        # Qwen2.5-VL uses the same postprocessing as flamingo
+        return postprocess_vqa_generation(text)
+    else:
+        # Default: use postprocess_vqa_generation for unknown models
+        return postprocess_vqa_generation(text)
 
 
 def parse_checkpoint_filename(checkpoint_path):
@@ -326,23 +332,47 @@ def get_lever_lm_path(cfg):
         return lever_lm_path
     
     if cfg.lever_lm_path is None:
-        logger.info(
-            f"detect lever_lm_path is None, now try to find in {cfg.result_dir}/model_cpk/{cfg.ex_name}"
-        )
-        cpk_dir = os.path.join(
-            cfg.result_dir, "model_cpk", cfg.task.task_name, cfg.ex_name
-        )
+        # 尝试多个可能的目录路径
+        possible_dirs = [
+            # 格式1: results/{dataset.name}/model_cpk/
+            os.path.join(cfg.result_dir, cfg.dataset.name, "model_cpk"),
+            # 格式2: results/model_cpk/{task.task_name}/{ex_name}
+            os.path.join(cfg.result_dir, "model_cpk", cfg.task.task_name, cfg.ex_name),
+            # 格式3: results/model_cpk/{ex_name}
+            os.path.join(cfg.result_dir, "model_cpk", cfg.ex_name),
+        ]
+        
         cpk_list = []
-        for f in os.listdir(cpk_dir):
-            cpk_list.append(os.path.join(cpk_dir, f))
-        cpk_list = list(filter(lambda x: cfg.default_cpk_key in x, cpk_list))
+        for cpk_dir in possible_dirs:
+            if os.path.exists(cpk_dir) and os.path.isdir(cpk_dir):
+                logger.info(f"尝试在目录中查找检查点: {cpk_dir}")
+                try:
+                    for f in os.listdir(cpk_dir):
+                        if f.endswith('.ckpt'):
+                            cpk_list.append(os.path.join(cpk_dir, f))
+                except Exception as e:
+                    logger.warning(f"无法读取目录 {cpk_dir}: {e}")
+                    continue
+        
         if cpk_list:
-            logger.info(f"Detect {cpk_list[0]}, now begin to load cpk...")
+            # 根据 default_cpk_key 过滤（如果指定了）
+            if cfg.default_cpk_key and cfg.default_cpk_key != "last":
+                filtered_list = list(filter(lambda x: cfg.default_cpk_key in x, cpk_list))
+                if filtered_list:
+                    cpk_list = filtered_list
+            
+            # 选择最新的检查点（如果 default_cpk_key 是 "last"）
+            if cfg.default_cpk_key == "last" or not cfg.default_cpk_key:
+                cpk_list.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            
             lever_lm_path = cpk_list[0]
+            logger.info(f"找到检查点: {lever_lm_path}")
+            return lever_lm_path
         else:
-            raise ValueError(
-                f"The lever_lm_path is None and detect no checkpoint can use in {cpk_dir}"
-            )
+            error_msg = f"未找到检查点文件。尝试过的目录:\n"
+            for cpk_dir in possible_dirs:
+                error_msg += f"  - {cpk_dir}\n"
+            raise ValueError(error_msg)
     else:
         lever_lm_path = cfg.lever_lm_path
     return lever_lm_path

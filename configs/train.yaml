@@ -45,15 +45,6 @@ dirpath: "${oc.env:RESULT_DIR}/model_cpk/${task.task_name}/${ex_name}"
 
 
 
-# wandb_args
-wandb_args:
-  save_dir: "${oc.env:RESULT_DIR}/wandb_logs"
-  name: "${ex_name}"
-  project: "LeverLM"
-  log_model: false
-
-  
-
 hydra:
   run:
     dir: ${result_dir}/hydra_output/${hydra.job.name}/${ex_name}/${now:%Y-%m-%d_%H-%M-%S}

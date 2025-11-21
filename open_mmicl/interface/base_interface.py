@@ -106,9 +106,10 @@ class BaseInterface:
         raise NotImplemented
 
     def generate(self, *args, **kwargs):
-        # Keep image_nums for Qwen2.5-VL beam search expansion
-        # image_nums is needed by Qwen2.5-VL's _expand_dict_for_generation_visual
-        # to correctly split image_grid_thw during beam search
+        # Remove image_nums from kwargs as it's not accepted by model.generate()
+        # image_nums is used internally by Qwen2.5-VL but should not be passed directly
+        # The model will calculate it from image_grid_thw if needed
+        kwargs.pop('image_nums', None)
         
         # Debug: Check image_grid_thw shape before passing to model.generate
         if 'image_grid_thw' in kwargs:

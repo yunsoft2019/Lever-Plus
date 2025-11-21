@@ -4,6 +4,18 @@ gpu_ids=${3:-"[0]"}
 sampler=${4:-rand_sampler}
 beam_model=${5:-flamingo_3B}
 
+# 解析 gpu_ids：将 "[0]" 或 "[0,1]" 转换为 Hydra 列表格式 [0] 或 [0,1]
+# 移除外层引号和方括号，然后重新格式化为 Hydra 列表格式
+if [[ "$gpu_ids" =~ ^\"?\[.*\]\"?$ ]]; then
+    # 移除外层引号和方括号
+    gpu_ids_clean=$(echo "$gpu_ids" | sed 's/^"*\[//' | sed 's/\]"*$//')
+    # 转换为 Hydra 列表格式 [0] 或 [0,1]
+    gpu_ids_hydra="[${gpu_ids_clean}]"
+else
+    # 如果格式不对，使用默认值
+    gpu_ids_hydra="[0]"
+fi
+
 # 根据数据集自动设置 sample_num
 case "$dataset" in
     okvqa*|OKVQA*)
@@ -21,11 +33,13 @@ case "$dataset" in
 esac
 
 echo "Dataset: $dataset, Sampler: $sampler, Beam Model: $beam_model, Sample num: $sample_num"
+echo "GPU IDs: $gpu_ids_hydra"
 
+# 注意：gpu_ids 参数不能加引号，否则 Hydra 会将其解析为字符串而不是列表
 python generate_data.py beam_size=5 \
                         cand_num=64 \
                         sample_num=${sample_num} \
-                        gpu_ids="${gpu_ids}" \
+                        gpu_ids=${gpu_ids_hydra} \
                         task=${task} \
                         dataset=${dataset} \
                         sampler=${sampler} \

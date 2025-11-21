@@ -16,7 +16,7 @@ device: cuda
 index_data_num: -1
 test_data_num: -1
 
-inference_bs: 4
+inference_bs: 1
 
 # MMTopK config:
 mmtopk_clip_name: openai/clip-vit-base-patch32
@@ -30,7 +30,7 @@ seed: 42
 lever_lm_path: null
 default_cpk_key: "last"
 random_order_lever_lm: false
-lever_lm_bs: 20
+lever_lm_bs: 1
 lever_lm_num_workers: 4
 reverse_seq: false
 

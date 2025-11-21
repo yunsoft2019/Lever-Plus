@@ -10,6 +10,10 @@ __pycache__/
 # Project specific directories to ignore
 checkpoints/
 results/
+open_flamingo/
+OpenICL/
+datasets/
+logs/
 *.py[cod]
 *$py.class
 

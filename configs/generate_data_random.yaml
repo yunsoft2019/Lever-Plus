@@ -22,7 +22,7 @@ scorer: "infoscore"
 
 # Others
 result_dir: "${oc.env:RESULT_DIR}"
-cache_dir: "${result_dir}/cache"
+cache_dir: "${result_dir}/${dataset.name}/cache"
 gpu_ids: [0]
 # load several models at the same time will cost large memory.
 # use sleep to load one by one.
@@ -33,7 +33,7 @@ log_level: "INFO"
 # hydra
 hydra:
   run:
-    dir: ${result_dir}/hydra_output/${hydra.job.name}/${task.task_name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${result_dir}/${dataset.name}/hydra_output/${hydra.job.name}/${task.task_name}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
-    dir: ${result_dir}/hydra_output/multirun/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${result_dir}/${dataset.name}/hydra_output/multirun/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
   verbose: "INFO"

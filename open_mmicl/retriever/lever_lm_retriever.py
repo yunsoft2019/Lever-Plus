@@ -47,7 +47,14 @@ class LeverLMRetriever(BaseRetriever):
         self.query_image_field = query_image_field
         self.query_text_field = query_text_field
         self.infer_batch_size = infer_batch_size
-        self.infer_num_workers = infer_num_workers
+        # 如果使用 CUDA，将 infer_num_workers 设置为 0，避免 CUDA 在多进程中的初始化问题
+        if isinstance(device, str) and 'cuda' in device.lower():
+            if infer_num_workers > 0:
+                import warnings
+                warnings.warn(f"CUDA device detected ({device}), setting infer_num_workers=0 to avoid CUDA multiprocessing issues")
+            self.infer_num_workers = 0
+        else:
+            self.infer_num_workers = infer_num_workers
         self.icd_text_field = icd_text_field
         self.icd_image_field = icd_image_field
         self.reverse_seq = reverse_seq

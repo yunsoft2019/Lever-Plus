@@ -2,7 +2,7 @@ _target_: lever_lm.candidate_sampler.img_sim_sampler.ImgSimSampler
 
 sampler_name: ImgSimSampler
 candidate_num: ${cand_num}
-cache_dir: "${result_dir}/cache"
+cache_dir: "${result_dir}/${dataset.name}/cache"
 overwrite: false
 dataset_name: ${dataset.name}
 clip_model_name: "openai/clip-vit-large-patch14"

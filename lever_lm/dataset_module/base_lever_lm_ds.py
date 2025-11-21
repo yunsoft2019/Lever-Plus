@@ -37,9 +37,9 @@ class BaseLeverLMDataset(Dataset):
         icd_score_list = data["icd_score"]
 
         self.index_ds = index_ds
+        # 移除 threshold 过滤逻辑，因为不同模型（如 Qwen2.5-VL）的分数范围不同
         for icd_seq, icd_score in zip(icd_seq_list, icd_score_list):
-            if icd_score < self.threshold:
-                continue
+            # 不再过滤：if icd_score < self.threshold: continue
             idx_list = icd_seq[:-1]
             if self.reverse_seq:
                 idx_list = reversed(idx_list)

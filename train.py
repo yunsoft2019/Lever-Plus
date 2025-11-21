@@ -13,7 +13,6 @@ from pytorch_lightning.callbacks import (
     RichModelSummary,
     RichProgressBar,
 )
-from pytorch_lightning.loggers.wandb import WandbLogger
 from torch import optim
 from torch.utils.data import DataLoader
 from transformers import CLIPProcessor, get_cosine_schedule_with_warmup
@@ -63,9 +62,18 @@ class SimpleTableLogger(Callback):
         })
     
     def on_train_end(self, trainer, pl_module):
+        import math
         print("="*50)
         print("训练完成！")
-        print(f"最佳 Val Loss: {min([m['val_loss'] for m in self.metrics_history if not float('nan') == m['val_loss']]):.6f}")
+        # 过滤出有效的验证损失值（排除 NaN 和 Inf）
+        valid_val_losses = [
+            m['val_loss'] for m in self.metrics_history 
+            if not (math.isnan(m['val_loss']) or math.isinf(m['val_loss']))
+        ]
+        if valid_val_losses:
+            print(f"最佳 Val Loss: {min(valid_val_losses):.6f}")
+        else:
+            print("警告: 没有有效的验证损失记录（可能是验证数据为空）")
         print("="*50)
 
 
@@ -147,6 +155,20 @@ class ICDSeqDataModule(pl.LightningDataModule):
             self.valset = self.ds_factory(
                 data_list=self.val_data_list, index_ds=self.index_ds
             )
+            # 检查验证数据集是否为空
+            if len(self.valset) == 0:
+                val_icd_seq_len = len(self.val_data_list.get('icd_seq', []))
+                val_icd_score_len = len(self.val_data_list.get('icd_score', []))
+                val_scores = self.val_data_list.get('icd_score', [])
+                if val_scores:
+                    min_score = min(val_scores)
+                    max_score = max(val_scores)
+                    print(f"警告: 验证数据集为空 (len={len(self.valset)})")
+                    print(f"  验证数据列表长度: icd_seq={val_icd_seq_len}, icd_score={val_icd_score_len}")
+                    print(f"  验证数据分数范围: min={min_score:.6f}, max={max_score:.6f}")
+                    print(f"  可能原因: 验证数据格式不正确或数据集创建时出错")
+                else:
+                    print(f"警告: 验证数据集为空，且验证数据列表也为空")
 
     def train_dataloader(self):
         global collate_fn
@@ -174,14 +196,9 @@ class ICDSeqDataModule(pl.LightningDataModule):
 def main(cfg: DictConfig):
     pl.seed_everything(cfg.seed)
 
-    # 根据配置决定是否使用 wandb
-    use_wandb = cfg.get('use_wandb', True)
+    # 不使用 wandb，禁用 logger
     use_simple_logger = cfg.get('use_simple_logger', False)
-    
-    if use_wandb:
-        logger = WandbLogger(**cfg.wandb_args)
-    else:
-        logger = False  # 禁用 logger
+    logger = False  # 禁用 logger
     
     # 只保存 val_loss 最优的模型（不保存 train_loss 最优的）
     # 使用自定义文件名前缀（如果提供）或默认格式

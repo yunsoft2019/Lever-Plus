@@ -143,17 +143,41 @@ def gen_data(
         logger.info(f"Rank: {rank} task is Done.")
         return
 
-    subset = subset.select(range(len(final_res), len(subset)))
+    # Filter out already processed samples by checking their idx in final_res
+    # The keys in final_res are the test_data["idx"] values, not sequential indices
+    processed_indices = set(final_res.keys())
+    remaining_subset = []
+    remaining_cand_set_idx = []
+    
+    for i, test_data in enumerate(subset):
+        test_data_idx = str(test_data["idx"])
+        if test_data_idx not in processed_indices:
+            remaining_subset.append(test_data)
+            remaining_cand_set_idx.append(sub_cand_set_idx[i])
+    
+    logger.info(
+        f"Rank: {rank} skipping {len(subset) - len(remaining_subset)} already processed samples, "
+        f"processing {len(remaining_subset)} remaining samples"
+    )
+    
+    if len(remaining_subset) == 0:
+        logger.info(f"Rank: {rank} All samples already processed.")
+        return
+    
+    # Convert back to Dataset for iteration
+    from datasets import Dataset
+    remaining_subset = Dataset.from_list(remaining_subset)
+    
     for i, test_data in enumerate(
         tqdm(
-            subset,
+            remaining_subset,
             disable=(rank != world_size - 1),
-            total=subset_size,
+            total=len(remaining_subset),
             initial=len(final_res),
             ncols=100,
         ),
     ):
-        candidate_set = train_ds.select(sub_cand_set_idx[i])
+        candidate_set = train_ds.select(remaining_cand_set_idx[i])
         res = generate_single_sample_icd(
             interface=interface,
             test_data=test_data,
@@ -175,17 +199,23 @@ def gen_data(
     version_base=None, config_path="./configs", config_name="generate_data.yaml"
 )
 def main(cfg: DictConfig):
-    if not os.path.exists(cfg.result_dir):
-        os.makedirs(cfg.result_dir)
-    cache_dir = cfg.sampler.cache_dir
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
+    # Ensure result_dir is absolute path (Hydra may change working directory)
+    result_dir = os.path.abspath(cfg.result_dir)
+    if not os.path.exists(result_dir):
+        os.makedirs(result_dir)
     
     # Get dataset name (remove _local suffix if present)
     dataset_name = cfg.dataset.name.replace('_local', '')
     
+    # Override cache_dir to use dataset name without _local suffix
+    # This ensures cache is stored in results/{dataset_name}/cache instead of results/{dataset_name}_local/cache
+    cache_dir = os.path.join(result_dir, dataset_name, "cache")
+    cfg.sampler.cache_dir = cache_dir
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
     # Build save directory with dataset name: result_dir/{dataset_name}/generated_data
-    save_dir = os.path.join(cfg.result_dir, dataset_name, "generated_data")
+    save_dir = os.path.join(result_dir, dataset_name, "generated_data")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     sub_proc_save_dir = os.path.join(save_dir, "sub_proc_data")
@@ -195,12 +225,21 @@ def main(cfg: DictConfig):
     # Sanitize model name for filename (replace special characters)
     model_name_safe = cfg.infer_model.name.replace(".", "_").replace("/", "_").replace(" ", "_")
     
+    # Sanitize filename: replace any full-width colons with standard colons
+    # and ensure all colons are standard ASCII colons
+    scorer_str = str(cfg.scorer).replace('\uf03a', ':').replace('：', ':')
+    construct_order_str = str(cfg.construct_order).replace('\uf03a', ':').replace('：', ':')
+    
     save_file_name = (
         f"{cfg.task.task_name}-{cfg.dataset.name}-"
-        f"{model_name_safe}-{cfg.sampler.sampler_name}-scorer:{cfg.scorer}-construct_order:{cfg.construct_order}-"
+        f"{model_name_safe}-{cfg.sampler.sampler_name}-scorer:{scorer_str}-construct_order:{construct_order_str}-"
         f"beam_size:{cfg.beam_size}-few_shot:{cfg.few_shot_num}-"
         f"candidate_num:{cfg.sampler.candidate_num}-sample_num:{cfg.sample_num}.json"
     )
+    
+    # Final sanitization: replace any remaining non-standard characters
+    # Replace full-width colon (U+F03A) and Chinese colon (：) with standard colon
+    save_file_name = save_file_name.replace('\uf03a', ':').replace('：', ':')
 
     sub_save_path = os.path.join(sub_proc_save_dir, save_file_name)
     save_path = os.path.join(save_dir, save_file_name)
@@ -249,16 +288,20 @@ def main(cfg: DictConfig):
             os.path.basename(save_path).split(".")[0]
             + f"_rank:{rank}_({subset_start}, {subset_end}).json"
         )
-        sub_save_path = sub_save_path.replace(
-            os.path.basename(sub_save_path), sub_res_basename
-        )
-        with open(sub_save_path, "r") as f:
-            data = json.load(f)
-        logger.info(f"load the data from {sub_save_path}, the data length: {len(data)}")
-        total_data.update(data)
-    with open(save_path, "w") as f:
-        json.dump(total_data, f)
-    logger.info(f"save the final data to {save_path}")
+        # Use absolute path for sub_proc_save_dir
+        rank_sub_save_path = os.path.join(sub_proc_save_dir, sub_res_basename)
+        if os.path.exists(rank_sub_save_path):
+            with open(rank_sub_save_path, "r") as f:
+                data = json.load(f)
+            logger.info(f"load the data from {rank_sub_save_path}, the data length: {len(data)}")
+            total_data.update(data)
+        else:
+            logger.warning(f"Rank {rank} sub-process file not found: {rank_sub_save_path}")
+    if total_data:
+        save_path_abs = os.path.abspath(save_path)
+        with open(save_path_abs, "w") as f:
+            json.dump(total_data, f)
+        logger.info(f"save the final data to {save_path_abs}")
 
 
 @hydra.main(

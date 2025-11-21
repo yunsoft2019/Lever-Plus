@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import random
+import sys
 import uuid
 
 import hydra
@@ -14,7 +15,6 @@ from tqdm import tqdm
 from transformers import AutoProcessor
 
 from lever_lm.utils import init_interface
-from open_mmicl.icl_inferencer import ICLInferecer
 from open_mmicl.metrics.cider_calculator import compute_cider
 from open_mmicl.metrics.vqa_metrics import compute_vqa_accuracy
 from open_mmicl.retriever import *
@@ -37,56 +37,6 @@ def record(result_json_path: str, new_data: dict):
     with open(result_json_path, "w") as f:
         recorded_data.update(new_data)
         json.dump(recorded_data, f, indent=4)
-
-
-def evaluate_retriever(
-    retriever_name,
-    inferencer,
-    retriever,
-    ds,
-    base_info,
-    shot_num_list,
-    result_json_path,
-    cfg,
-):
-    retriever_res = {}
-    info = base_info + retriever_name
-    for shot_num in shot_num_list:
-        logger.info(
-            f"Now begin test {cfg.task.task_name}: {retriever_name} with {shot_num=}"
-        )
-        output_files = info + f"-bs:{cfg.inference_bs}-{shot_num=}"
-        icd_idx_list = retriever.retrieve(shot_num)
-
-        if cfg.task.task_name == "caption":
-            metric = inference_caption(
-                inferencer=inferencer,
-                ds=ds,
-                icd_idx_list=icd_idx_list,
-                val_ann_path=cfg.dataset.val_coco_annotation_file,
-                output_json_filename=output_files,
-                model_name=cfg.infer_model.name,
-            )
-        elif cfg.task.task_name == "vqa":
-            metric = inference_vqa(
-                inferencer=inferencer,
-                ds=ds,
-                icd_idx_list=icd_idx_list,
-                val_ques_path=cfg.dataset.val_ques_path,
-                val_ann_path=cfg.dataset.val_ann_path,
-                output_json_filename=output_files,
-                model_name=cfg.infer_model.name,
-            )
-        elif cfg.task.task_name == "sst2":
-            metric = inference_cls(
-                inferencer=inferencer,
-                ds=ds,
-                icd_idx_list=icd_idx_list,
-                output_json_filename=output_files,
-            )
-        retriever_res[f"{shot_num=}"] = metric
-        logger.info(f"{output_files}: {metric=}")
-        record(result_json_path, {info: retriever_res})
 
 
 def inference_cls(
@@ -182,92 +132,347 @@ def init_retriever(retriever_name, ds, cfg):
     return None
 
 
-def inference_caption(
-    inferencer,
-    ds,
-    icd_idx_list,
-    val_ann_path,
-    output_json_filename,
-    model_name,
-):
-    output_dict = inferencer.inference(
-        train_ds=ds["train"],
-        test_ds=ds["validation"],
-        ice_idx_list=icd_idx_list,
-        output_json_filename=output_json_filename,
-    )
-    pred_coco = []
-    for idx in output_dict:
-        pred_coco.append(
-            {
-                "image_id": output_dict[idx]["image_id"],
-                "caption": caption_postprocess(
-                    output_dict[idx]["prediction"], model_name
-                ),
-            }
-        )
-    cider_score = compute_cider(pred_coco, val_ann_path)
-    return cider_score * 100
-
-
-def inference_vqa(
-    inferencer,
-    ds,
+def inference_vqa_direct(
+    interface,
+    train_ds,
+    test_ds,
     icd_idx_list,
     val_ques_path,
     val_ann_path,
-    output_json_filename,
     model_name,
+    generation_kwargs,
 ):
-    output_dict = inferencer.inference(
-        train_ds=ds["train"],
-        test_ds=ds["validation"],
-        ice_idx_list=icd_idx_list,
-        output_json_filename=output_json_filename,
-    )
+    """
+    直接推理VQA任务，按照步骤：
+    1. 遍历测试集
+    2. 根据范例id找到范例数据
+    3. 包装messages（区分Flamingo和Qwen2.5-VL）
+    4. 输入模型得到答案
+    5. 计算准确率
+    """
     preds = []
-    for idx in output_dict:
-        preds.append(
-            {
-                "answer": vqa_postprocess(
-                    output_dict[idx]["prediction"], model_name=model_name
-                ),
-                "question_id": output_dict[idx]["question_id"],
-            }
-        )
-    random_uuid = str(uuid.uuid4())
+    
+    # 遍历测试集
+    for idx, sample in enumerate(tqdm(test_ds, desc="推理中", ncols=100)):
+        if icd_idx_list is not None and idx < len(icd_idx_list):
+            example_indices = icd_idx_list[idx]
+            
+            # 步骤4：根据范例id，找到范例的图片，问题，答案
+            ice_sample_list = []
+            for ex_idx in example_indices:
+                if ex_idx < len(train_ds):
+                    ice_sample_list.append(train_ds[ex_idx])
+                else:
+                    logger.warning(f"警告：范例索引 {ex_idx} 超出训练集范围（训练集大小: {len(train_ds)}）")
+            
+            # 将范例和测试样本组合
+            data_sample_list = ice_sample_list + [sample]
+            
+            # 步骤5：包装messages（区分Flamingo和Qwen2.5-VL）
+            # 使用transfer_prompts转换为prompt格式
+            prompts = interface.transfer_prompts(
+                [data_sample_list], is_last_for_generation=True
+            )
+            
+            # 使用prepare_input转换为messages格式（tensor）
+            input_dict = interface.prepare_input(
+                prompts, is_last_for_generation=True
+            )
+            
+            # 处理 BatchFeature 对象，转换为 dict
+            if hasattr(input_dict, 'data'):
+                input_dict = dict(input_dict.data)
+            elif not isinstance(input_dict, dict):
+                input_dict = dict(input_dict)
+            
+            # 将数据移动到设备
+            data = {k: v.to(interface.device) if isinstance(v, torch.Tensor) else v 
+                   for k, v in input_dict.items()}
+            
+            # 处理 Qwen2.5-VL 的特殊情况（image_grid_thw）
+            if 'image_grid_thw' in data:
+                if data['image_grid_thw'].dim() == 3 and data['image_grid_thw'].shape[0] == 1:
+                    # 移除batch维度
+                    data['image_grid_thw'] = data['image_grid_thw'].squeeze(0)
+                    if 'image_nums' in data:
+                        if isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() > 1:
+                            data['image_nums'] = data['image_nums'][0:1]
+                        elif isinstance(data['image_nums'], list) and len(data['image_nums']) > 0:
+                            data['image_nums'] = torch.tensor([data['image_nums'][0]], dtype=torch.long)
+                elif data['image_grid_thw'].dim() == 2:
+                    if 'image_nums' not in data:
+                        num_images = data['image_grid_thw'].shape[0]
+                        data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+            
+            # 步骤6：把messages输入推理模型，得到推理答案
+            prompt_len = int(data["attention_mask"].shape[1])
+            
+            with torch.inference_mode():
+                outputs = interface.generate(
+                    **data,
+                    eos_token_id=interface.tokenizer.eos_token_id,
+                    pad_token_id=interface.tokenizer.pad_token_id,
+                    **generation_kwargs,
+                )
+            
+            # 解码生成结果
+            if isinstance(outputs, torch.Tensor):
+                outputs = outputs.tolist()
+            
+            # 确保outputs是列表格式
+            if not isinstance(outputs, list):
+                outputs = [outputs]
+            if len(outputs) > 0 and not isinstance(outputs[0], list):
+                outputs = [outputs]
+            
+            # 解码：只取prompt之后的部分
+            generated = interface.tokenizer.batch_decode(
+                [output[prompt_len:] for output in outputs],
+                skip_special_tokens=True,
+            )
+            
+            # 后处理得到answer
+            prediction = generated[0] if generated else ""
+            answer = vqa_postprocess(prediction, model_name=model_name)
+            
+            # 保存预测结果
+            question_id = sample.get('question_id', None)
+            if question_id is not None:
+                preds.append({
+                    "answer": answer,
+                    "question_id": question_id,
+                })
+            else:
+                logger.warning(f"样本 {idx}: 缺少 question_id，无法用于计算准确率")
+        else:
+            logger.warning(f"样本 {idx}: 无法获取 ICDs 列表（icd_idx_list 为空或索引超出范围）")
+    
+    # 步骤7：根据推理答案计算准确率
+    if len(preds) > 0:
+        random_uuid = str(uuid.uuid4())
+        temp_result_file = f"{random_uuid}.json"
+        
+        with open(temp_result_file, "w") as f:
+            json.dump(preds, f, indent=4)
+        
+        try:
+            accuracy = compute_vqa_accuracy(temp_result_file, val_ques_path, val_ann_path)
+            # 处理准确率格式
+            if accuracy > 1:
+                accuracy_percent = accuracy
+                accuracy_decimal = accuracy / 100
+            else:
+                accuracy_decimal = accuracy
+                accuracy_percent = accuracy * 100
+            return accuracy_decimal
+        finally:
+            if os.path.exists(temp_result_file):
+                os.remove(temp_result_file)
+    else:
+        logger.warning("没有有效的预测结果，无法计算准确率")
+        return 0.0
 
-    with open(f"{random_uuid}.json", "w") as f:
-        f.write(json.dumps(preds, indent=4))
-    acc = compute_vqa_accuracy(f"{random_uuid}.json", val_ques_path, val_ann_path)
-    # delete the temporary file
-    os.remove(f"{random_uuid}.json")
-    return acc
+
+def inference_caption_direct(
+    interface,
+    train_ds,
+    test_ds,
+    icd_idx_list,
+    val_ann_path,
+    model_name,
+    generation_kwargs,
+):
+    """
+    直接推理Caption任务
+    """
+    pred_coco = []
+    
+    # 遍历测试集
+    for idx, sample in enumerate(tqdm(test_ds, desc="推理中", ncols=100)):
+        if icd_idx_list is not None and idx < len(icd_idx_list):
+            example_indices = icd_idx_list[idx]
+            
+            # 根据范例id找到范例数据
+            ice_sample_list = []
+            for ex_idx in example_indices:
+                if ex_idx < len(train_ds):
+                    ice_sample_list.append(train_ds[ex_idx])
+            
+            # 将范例和测试样本组合
+            data_sample_list = ice_sample_list + [sample]
+            
+            # 包装messages
+            prompts = interface.transfer_prompts(
+                [data_sample_list], is_last_for_generation=True
+            )
+            
+            input_dict = interface.prepare_input(
+                prompts, is_last_for_generation=True
+            )
+            
+            # 处理 BatchFeature 对象
+            if hasattr(input_dict, 'data'):
+                input_dict = dict(input_dict.data)
+            elif not isinstance(input_dict, dict):
+                input_dict = dict(input_dict)
+            
+            # 将数据移动到设备
+            data = {k: v.to(interface.device) if isinstance(v, torch.Tensor) else v 
+                   for k, v in input_dict.items()}
+            
+            # 处理 Qwen2.5-VL 的特殊情况
+            if 'image_grid_thw' in data:
+                if data['image_grid_thw'].dim() == 3 and data['image_grid_thw'].shape[0] == 1:
+                    data['image_grid_thw'] = data['image_grid_thw'].squeeze(0)
+                    if 'image_nums' in data:
+                        if isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() > 1:
+                            data['image_nums'] = data['image_nums'][0:1]
+                        elif isinstance(data['image_nums'], list) and len(data['image_nums']) > 0:
+                            data['image_nums'] = torch.tensor([data['image_nums'][0]], dtype=torch.long)
+                elif data['image_grid_thw'].dim() == 2:
+                    if 'image_nums' not in data:
+                        num_images = data['image_grid_thw'].shape[0]
+                        data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+            
+            # 模型生成
+            prompt_len = int(data["attention_mask"].shape[1])
+            
+            with torch.inference_mode():
+                outputs = interface.generate(
+                    **data,
+                    eos_token_id=interface.tokenizer.eos_token_id,
+                    pad_token_id=interface.tokenizer.pad_token_id,
+                    **generation_kwargs,
+                )
+            
+            # 解码生成结果
+            if isinstance(outputs, torch.Tensor):
+                outputs = outputs.tolist()
+            
+            if not isinstance(outputs, list):
+                outputs = [outputs]
+            if len(outputs) > 0 and not isinstance(outputs[0], list):
+                outputs = [outputs]
+            
+            generated = interface.tokenizer.batch_decode(
+                [output[prompt_len:] for output in outputs],
+                skip_special_tokens=True,
+            )
+            
+            # 后处理得到caption
+            prediction = generated[0] if generated else ""
+            caption = caption_postprocess(prediction, model_name)
+            
+            image_id = sample.get('image_id', None)
+            if image_id is not None:
+                pred_coco.append({
+                    "image_id": image_id,
+                    "caption": caption,
+                })
+    
+    # 计算CIDEr分数
+    if len(pred_coco) > 0:
+        cider_score = compute_cider(pred_coco, val_ann_path)
+        return cider_score * 100
+    else:
+        return 0.0
+
+
+def evaluate_retriever(
+    retriever_name,
+    interface,
+    retriever,
+    ds,
+    base_info,
+    shot_num_list,
+    result_json_path,
+    cfg,
+):
+    retriever_res = {}
+    info = base_info + retriever_name
+    
+    for shot_num in shot_num_list:
+        logger.info(
+            f"Now begin test {cfg.task.task_name}: {retriever_name} with {shot_num=}"
+        )
+        output_files = info + f"-bs:{cfg.inference_bs}-{shot_num=}"
+        
+        # 步骤3：根据测试集的图片和问题，通过SFT进行预测范例id
+        icd_idx_list = retriever.retrieve(shot_num)
+        
+        # 获取生成参数
+        generation_kwargs = cfg.task.gen_args if hasattr(cfg.task, 'gen_args') else {}
+        
+        if cfg.task.task_name == "caption":
+            metric = inference_caption_direct(
+                interface=interface,
+                train_ds=ds["train"],
+                test_ds=ds["validation"],
+                icd_idx_list=icd_idx_list,
+                val_ann_path=cfg.dataset.val_coco_annotation_file,
+                model_name=cfg.infer_model.name,
+                generation_kwargs=generation_kwargs,
+            )
+        elif cfg.task.task_name == "vqa":
+            metric = inference_vqa_direct(
+                interface=interface,
+                train_ds=ds["train"],
+                test_ds=ds["validation"],
+                icd_idx_list=icd_idx_list,
+                val_ques_path=cfg.dataset.val_ques_path,
+                val_ann_path=cfg.dataset.val_ann_path,
+                model_name=cfg.infer_model.name,
+                generation_kwargs=generation_kwargs,
+            )
+        elif cfg.task.task_name == "sst2":
+            # SST2任务仍使用原来的inferencer方式
+            from open_mmicl.icl_inferencer import ICLInferecer
+            inferencer = ICLInferecer(
+                interface=interface,
+                train_ds=ds["train"],
+                test_ds=ds["validation"],
+                generation_kwargs=generation_kwargs,
+                other_save_field=cfg.task.other_save_field,
+                num_workers=cfg.num_workers,
+                num_proc=cfg.num_proc,
+                batch_size=cfg.inference_bs,
+                output_json_filepath=None,
+            )
+            metric = inference_cls(
+                inferencer=inferencer,
+                ds=ds,
+                icd_idx_list=icd_idx_list,
+                output_json_filename=output_files,
+            )
+        else:
+            logger.error(f"不支持的任务类型: {cfg.task.task_name}")
+            continue
+        
+        retriever_res[f"{shot_num=}"] = metric
+        logger.info(f"{output_files}: {metric=}")
+        record(result_json_path, {info: retriever_res})
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="inference.yaml")
 def main(cfg: DictConfig):
+    # 设置日志级别为 INFO，过滤掉 DEBUG 日志
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name}:{function}:{line} - {message}")
+    
     logger.info(f"{cfg=}")
     
-    # 构建新的输出路径格式: results/{数据集名}/icl_inference/{束搜索模型}_{选择器名}_infoscore_left_beam5_shot2_cand64_sample800_metrics.json
-    # 如果使用 LeverLMRetriever，从检查点文件名中提取信息
+    # 构建结果路径
     if cfg.test_lever_lm:
         try:
             lever_lm_path = get_lever_lm_path(cfg)
             checkpoint_info = parse_checkpoint_filename(lever_lm_path)
             
-            # 获取数据集名（去掉 _local 后缀）
             dataset_name = cfg.dataset.name.replace('_local', '')
-            
-            # 获取束搜索模型名
             infer_model_name = cfg.infer_model.name
-            
-            # 获取选择器名和训练参数
             sampler_name = checkpoint_info.get('sampler_name')
             training_params = checkpoint_info.get('training_params')
             
             if sampler_name and training_params:
-                # 构建新格式的路径
                 result_filename = f"{infer_model_name}_{sampler_name}_{training_params}_metrics.json"
                 result_dir = os.path.join(
                     cfg.result_dir,
@@ -277,7 +482,6 @@ def main(cfg: DictConfig):
                 result_json_path = os.path.join(result_dir, result_filename)
                 logger.info(f"使用新路径格式: {result_json_path}")
             else:
-                # 如果无法解析检查点文件名，使用旧格式
                 logger.warning(f"无法从检查点文件名解析信息，使用旧路径格式")
                 result_dir = os.path.join(
                     cfg.result_dir,
@@ -288,7 +492,6 @@ def main(cfg: DictConfig):
                 )
                 result_json_path = os.path.join(result_dir, "metrics.json")
         except Exception as e:
-            # 如果获取检查点路径失败，使用旧格式
             logger.warning(f"获取检查点路径失败: {e}，使用旧路径格式")
             result_dir = os.path.join(
                 cfg.result_dir,
@@ -299,7 +502,6 @@ def main(cfg: DictConfig):
             )
             result_json_path = os.path.join(result_dir, "metrics.json")
     else:
-        # 非 LeverLMRetriever 使用旧格式
         result_dir = os.path.join(
             cfg.result_dir,
             "icl_inference",
@@ -315,6 +517,12 @@ def main(cfg: DictConfig):
     test_data_num = cfg.test_data_num
     index_data_num = cfg.index_data_num
 
+    # 步骤1：加载SFT模型及模型参数，加载推理模型
+    logger.info("=" * 60)
+    logger.info("步骤1：加载模型")
+    logger.info("=" * 60)
+    
+    # 加载数据集
     ds = load_ds(cfg)
 
     if index_data_num != -1:
@@ -324,22 +532,14 @@ def main(cfg: DictConfig):
     if test_data_num != -1:
         ds["validation"] = ds["validation"].select(range(test_data_num))
 
+    # 加载推理模型（Flamingo-3B或Qwen2.5-VL）
+    logger.info(f"加载推理模型: {cfg.infer_model.name}")
     interface = init_interface(cfg, device=cfg.device)
-
-    inferencer = ICLInferecer(
-        interface=interface,
-        train_ds=ds["train"],
-        test_ds=ds["validation"],
-        generation_kwargs=cfg.task.gen_args,
-        other_save_field=cfg.task.other_save_field,
-        num_workers=cfg.num_workers,
-        num_proc=cfg.num_proc,
-        batch_size=cfg.inference_bs,
-        output_json_filepath=os.path.join(result_dir, "generation_metainfo"),
-    )
+    logger.info("推理模型加载完成")
 
     base_info = f"{str(datetime.datetime.now())}-{test_data_num=}-"
 
+    # 步骤2：遍历测试集（在evaluate_retriever中完成）
     retriever_list = [
         ("ZeroShot", [0] if cfg.test_zero_shot else []),
         ("RandomRetriever", cfg.shot_num_list if cfg.test_random else []),
@@ -361,13 +561,13 @@ def main(cfg: DictConfig):
         ),
     ]
 
-    # Test for other
+    # 测试不同的retriever
     for retriever_name, shot_nums in retriever_list:
         if shot_nums:  # Only initialize and evaluate if shot_nums is not empty
             retriever_instance = init_retriever(retriever_name, ds, cfg)
             evaluate_retriever(
                 retriever_name,
-                inferencer,
+                interface,
                 retriever_instance,
                 ds,
                 base_info,

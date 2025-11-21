@@ -1,161 +1,219 @@
-# Lever-LM
-Lever LM: Configuring In-Context Sequence to Lever Large Vision Language Models
+# Lever-Plus
 
-## News
-- [2024.09.26]🔥 Lever LM is accepted by Neurips2024.
+## 1. 环境部署
 
-## Prepare
-```
-git clone 
-conda create -n leverlm python=3.10
-conda activate leverlm
-pip install -r requirements.txt
+### 环境说明
 
-# install the openicl package
-mkdir requirements_repo
-cd requirements_repo
-# for anonymous submit, it will fix in Formal version
+1. 由于 faiss 当前最新版本是 1.13.0，而这个版本最高只支持 python 3.12，故本环境最高只能支持 python 3.12。
+
+2. open_flamingo 支持的最高版本是 python 3.9, torch 2.0.1，通过修改 setup.py，可支持 3.12 及 torch 2.9.1，可直接安装已修改的依赖。
+
+3. OpenICL 支持的最高版本是 python 3.10，通过修改 setup.py，可支持 3.12，可直接安装已修改的依赖。
+
+### 安装步骤
+
+```bash
+conda create -n lever_env python=3.12 -y
+conda activate lever_env
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128 
+conda install -c pytorch -c nvidia -c rapidsai -c conda-forge libnvjitlink faiss-gpu-cuvs=1.13.0 
+git clone https://github.com/mlfoundations/open_flamingo.git
+cd open_flamingo
+# 修改setup.py, 使之支持python3.12, torch2.9.1,
+pip install -e .
+cd ..
 git clone https://github.com/ForJadeForest/OpenICL.git
 cd OpenICL
-git checkout -b coco_caption origin/coco_caption
-pip install -e ./
-cd ../..
+# 修改setup.py, 使之支持pyton3.12,faiss1.13.0
+pip install -e .
+cd ..
+
+pip install hydra-core
+pip install more_itertools
+pip install python-dotenv
+pip install pytorch-lightning
+pip install omegaconf
+pip install pycocotools
+pip install pycocoevalcap
+pip install tensorboard
+pip install fsspec
+pip install datasets
+pip install aiohttp
+pip install pyarrow
+pip install loguru
+pip install multiprocess
+pip install -U rich
+pip install qwen_vl_utils
 ```
 
-## .env config
-You should set the Environment varibles for dataset path and openflamingo path:
-```
-CHECKPOINT_PATH="./openflamingo"  # the checkpoint path you want to save
-COCO_PATH="/path/to/mscoco"
-VQAV2_PATH="/path/to/vqav2"
-RESULT_DIR="/path/to/result"  # the dir to save result(checkpoint, inference metric, cache...)
-```
-The flamingo checkpoint path will download automatically.
+## 2. 执行脚本
 
+### 2.1 束搜索
 
-## Datasets
-### MSCOCO
-We use the mscoco train dataset to generate. 
-So you should prepare the mscoco2017 or mscoco2014
+**参数说明**: `task dataset gpu_ids sampler [beam_model]`
 
-```
-|-- mscoco
-|    |
-|    |- mscoco2017
-|    |   |
-|    |   |- train2017
-|    |   |- val2017
-|    |   |- annotations
-|    |       |
-|    |       |- captions_train2017.json
-|    |       |- captions_val2017.json
-|    |- mscoco2014
-|        |
-|        |- train2014
-|        |- val2014
-|        |- annotations
-|            |
-|            |- captions_train2014.json
-|            |- captions_val2014.json
-```
+- `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
 
-### VQAV2
-We use the VQAV2 train dataset to generate the good ICD Sequences.
-So you should prepare the VQAV2 dataset or if you can download datasets from huggingface you can use `configs/dataset/vqav2_online.yaml`. 
+#### 使用 Flamingo-3B 模型
+
 ```bash
-# For download the vqav2 dataset:
-wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Train_mscoco.zip -O /path/to/vqav2/
-wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Val_mscoco.zip -O /path/to/vqav2/
-wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Train_mscoco.zip -O /path/to/vqav2/
-wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Val_mscoco.zip -O /path/to/vqav2/
+# 随机采样器（RandSampler）
+bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler flamingo_3B
 
-cd /path/to/vqav2/
-unzip v2_Annotations_Train_mscoco.zip
-unzip v2_Annotations_Val_mscoco.zip
-unzip v2_Questions_Train_mscoco.zip
-unzip v2_Questions_Val_mscoco.zip
+# 文本相似度采样器（TextSimSampler）
+bash scripts/generate_data.sh vqa okvqa_local "[0]" text_sim_sampler flamingo_3B
 
+# 图片相似度采样器（ImgSimSampler）
+bash scripts/generate_data.sh vqa okvqa_local "[0]" img_sim_sampler flamingo_3B
 
-# for preprepare the dataset.
-python open_mmicl/dataset_module/preprocess/vqav2_hf.py --root_path /path/to/vqav2/
-```
-Then, set the `VQAV2_PATH` environment variable in `.env`. (If you use `vaqv2_local` as dataset)
-
-
-#### 1. Generation the train dataset
-
-```shell
-# for coco2017 image captioning
-bash scripts/generate_data.sh caption coco2017 "[0,1,2,3]" 
-
-# for vqav2
-bash scripts/generate_data.sh vqa vqav2_local "[0,1,2,3]"
-# We support vqav2 dataset of hf. It will download the dataset automatically.
-bash scripts/generate_data.sh vqa vqav2_online "[0,1,2,3]"
+# 混合采样器（MixSampler）
+bash scripts/generate_data.sh vqa okvqa_local "[0]" mix_sampler flamingo_3B
 ```
 
-#### 2. Train the Lever-LM Mode
-```shell
-# for coco2017 image captioning
-bash scripts/train_lever_lm.sh caption coco2017 1 query_img_icd_img_text
+#### 使用 Qwen2.5-VL-3B-Instruct 模型（后台运行）
 
-# for vqav2
-bash scripts/train_lever_lm.sh vqa vqav2_local 1 query_img_text_icd_img_text
-# or use hf vqav2 dataset
-bash scripts/train_lever_lm.sh vqa vqav2_online 1 query_img_text_icd_img_text
+```bash
+# 随机采样器（RandSampler）
+bash scripts/run_generate_data_background.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
+
+# 文本相似度采样器（TextSimSampler）
+bash scripts/run_generate_data_background.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
+
+# 图片相似度采样器（ImgSimSampler）
+bash scripts/run_generate_data_background.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
+
+# 混合采样器（MixSampler）
+bash scripts/run_generate_data_background.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
 ```
 
-```
-python train.py
-```
-Args:
-- `train`: Options are `query_img_icd_idx`, `query_img_icd_img_text`, `query_img_icd_img`, `query_img_icd_text`, `query_img_text_icd_img_text`. 'img' after 'query' indicates the addition of image information to the query sample. 'text' after 'query' indicates the addition of text information to the query sample. The same applies to 'icd'.
-- `dataset`: Defines the dataset for In-context Learning. For caption tasks, you can choose either coco2017 or coco2014; for VQA tasks, choose between vqav2_local or vqav2_online. This parameter also includes the dataset path and other relevant information.
-- `task`: Options are `vqa` or `caption`, configuring parameters related to prompt
-- `data_files`: Specifies the names of the JSON data files generated in the first step.
-- `trainer_args`: the lightning triner args
-- `lr`: learning rate
-- `ex_name`: Name of the current experiment, which is also the name of the folder for saving experimental results. 
-- `seed`: Sets the seed for random number generation.
+#### 后台任务管理命令
 
-#### 3. Use Flamingo Inference
-```shell
-# for coco2017 image captioning
-bash scripts/inference.sh caption coco2017 0 query_img_icd_img_text
+```bash
+# 列出所有运行中的任务
+bash scripts/manage_background_tasks.sh list
 
-# for vqav2
-bash scripts/inference.sh vqa vqav2_local 0 query_img_text_icd_img_text
-# or use hf vqav2 dataset
-bash scripts/inference.sh vqa vqav2_online 0 query_img_text_icd_img_text
-# You can use a vqav2 sub-val set to validate the performance, which only contain 1w samples. 
-bash scripts/inference.sh vqa vqav2_local_sub 0 query_img_text_icd_img_text
+# 停止指定PID的任务
+bash scripts/manage_background_tasks.sh stop <pid>
+
+# 停止所有generate_data任务
+bash scripts/manage_background_tasks.sh stop-all
+
+# 查看所有日志文件
+bash scripts/manage_background_tasks.sh logs
 ```
 
-```shell
-python inference_flamingo.py
+### 2.2 训练
+
+**参数说明**: `task dataset gpu_id lever_lm sampler [beam_model]`
+
+- `gpu_id`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
+- `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
+- **注意**: `beam_model` 必须与生成数据时使用的模型一致
+
+#### 使用 Flamingo-3B 生成的束搜索数据训练
+
+```bash
+# 随机采样器（使用 GPU 0）
+bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
+
+# 文本相似度采样器（使用 GPU 1）
+bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler flamingo_3B
+
+# 图片相似度采样器（使用 GPU 2）
+bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler flamingo_3B
+
+# 混合采样器（使用 GPU 3）
+bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler flamingo_3B
 ```
-If test the lever_lm model, you should set:
-- `train`: Options are `query_img_icd_idx`, `query_img_icd_img_text`, `query_img_icd_img`, `query_img_icd_text`, `query_img_text_icd_img_text`. 'img' after 'query' indicates the addition of image information to the query sample. 'text' after 'query' indicates the addition of text information to the query sample. The same applies to 'icd'.
-- `lever_lm_path`: Path to the model checkpoint.
-- `test_lever_lm`: Set to true.
-- `random_order_lever_lm_iocd`: If set `True`, the icd configuration generated by Lever-LM will be randomly shuffled. 
-- `default_cpk_key`: The checkpoint key word. You can set it to `last` or `min_loss`
-- `ex_name`: Name of the current experiment, which is also the name of the folder for saving inference results. 
 
+#### 使用 Qwen2.5-VL-3B-Instruct 生成的束搜索数据训练
 
-Other args;
-- `dataset`: Defines the dataset for In-context Learning. For caption tasks, choose either coco2017 or coco2014; for VQA tasks, choose between vqav2_local or vqav2_online.
-- `task`: Options are `vqa` or `caption`, configuring parameters related to prompt
-- `flamingo`: Flamingo model version, options include `flamingo_3B`, `flamingo_9B`.
-- `index_data_num`: Number of items in the ICD training set, -1 for all.
-- `test_data_num`: Number of items in the test set, -1 for all.
-- `inference_bs`：Batch size for inference. For a 3090 with 24G of memory, a setting of 4 is feasible for 16 shots.
-- `shot_num_list`: The shot num you want to test.
+```bash
+# 随机采样器（使用 GPU 0）
+bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
 
-Test Retrieval-based Method: 
-- `test_random`: Use RS as the retrieval method.
-- `test_t2t`: Use STTR as the retrieval method.
-- `test_i2t`: Use SITR as the retrieval method.
-- `test_i2i`: Use SIIR as the retrieval method.
-- `mmtopk_clip_name`: CLIP model name to calculate the similarity.
-- `mmtopk_reversed_order`: If set `True`, the rightmost ICD is the most similar, while set `False`, the leftmost ICD is the most similar.
+# 文本相似度采样器（使用 GPU 1）
+bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
+
+# 图片相似度采样器（使用 GPU 2）
+bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
+
+# 混合采样器（使用 GPU 3）
+bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
+```
+
+### 2.3 推理
+
+**参数说明**: `task dataset device lever_lm sampler [beam_model]`
+
+- `device`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
+- `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
+- **注意**: `beam_model` 必须与训练时使用的模型一致，用于选择对应的检查点文件
+- **注意**: 推理时批量大小固定为1，避免批处理时的图像数量不匹配问题
+
+#### 使用 Flamingo-3B 训练的模型进行推理
+
+```bash
+# 随机采样器（RandSampler）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
+
+# 文本相似度采样器（TextSimSampler）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text text_sim_sampler flamingo_3B
+
+# 图片相似度采样器（ImgSimSampler）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text img_sim_sampler flamingo_3B
+
+# 混合采样器（MixSampler）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text mix_sampler flamingo_3B
+```
+
+#### 使用 Qwen2.5-VL-3B-Instruct 训练的模型进行推理
+
+```bash
+# 随机采样器（RandSampler）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+
+# 文本相似度采样器（TextSimSampler）
+bash scripts/inference.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
+
+# 图片相似度采样器（ImgSimSampler）
+bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
+
+# 混合采样器（MixSampler）
+bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
+```
+
+## 3. 推理结果
+
+### 3.1 Flamingo-3B 模型结果
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | **23.04**   | 19.98          | 21.05         | 20.63      |
+| 2        | 20.97       | 21.89          | **23.06**     | 20.94      |
+| 3        | 23.29       | 22.94          | **23.63**     | 20.31      |
+| 4        | **25.28**   | 24.14          | 24.59         | 22.87      |
+| 6        | **24.45**   | 24.0           | 23.93         | 23.25      |
+| 8        | **24.68**   | 24.11          | 24.06         | 24.24      |
+
+**最佳结果**: 25.28% (RandSampler, shot_num=4)
+
+### 3.2 Qwen2.5-VL-3B-Instruct 模型结果
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | **52.04**   | 48.91          | 48.60         | 50.19      |
+| 2        | 49.76       | 44.66          | 43.98         | **46.36**  |
+| 3        | 48.06       | 43.54          | 42.55         | 45.36      |
+| 4        | 47.60       | 41.76          | 42.12         | 44.08      |
+| 6        | 46.55       | 42.90          | 42.39         | 44.26      |
+| 8        | 46.52       | 42.60          | 42.53         | 43.65      |
+
+**最佳结果**: 52.04% (RandSampler, shot_num=1)
+
+### 3.3 结果说明
+
+- **数据集**: OKVQA
+- **训练参数**: infoscore_left_beam5_shot2_cand64_sample800
+- **Flamingo-3B**: 最佳配置为 RandSampler + shot_num=4，准确率 25.28%
+- **Qwen2.5-VL-3B-Instruct**: 最佳配置为 RandSampler + shot_num=1，准确率 52.04%

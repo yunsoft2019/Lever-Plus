@@ -34,7 +34,7 @@ log_level: "INFO"
 # hydra
 hydra:
   run:
-    dir: ${result_dir}/hydra_output/${hydra.job.name}/${task.task_name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${result_dir}/${dataset.name}/hydra_output/${hydra.job.name}/${task.task_name}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
-    dir: ${result_dir}/hydra_output/multirun/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${result_dir}/${dataset.name}/hydra_output/multirun/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
   verbose: "INFO"
