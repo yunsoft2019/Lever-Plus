@@ -11,6 +11,7 @@ lever_lm=${4:-query_img_text_icd_img_text}
 sampler=${5:-text_sim_sampler}
 shot_num=${6:-8}
 inference_bs=${7:-4}
+version=${8:-v0}
 
 # 将 sampler 转换为大驼峰格式（与实际生成的文件名匹配）
 case "$sampler" in
@@ -62,7 +63,8 @@ case "$dataset" in
 esac
 
 # 构建检查点目录和文件名模式
-checkpoint_dir="./results/${dataset_name}/model_cpk"
+# 添加版本目录支持：v0, v1, v2, v3, v4...
+checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
 checkpoint_filename_pattern="${model_name}_${sampler_name}_infoscore_left_beam5_shot2_cand64_sample${sample_num}"
 
 # 查找匹配的检查点文件
@@ -77,6 +79,17 @@ fi
 # 3. 如果还是没找到，在当前数据集目录查找包含采样器名称的所有文件
 if [ ${#ckpt_files[@]} -eq 0 ]; then
     ckpt_files=($(ls -t "${checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
+fi
+
+# 3.5. 如果还是没找到，在当前版本目录的父目录中搜索（兼容旧文件）
+if [ ${#ckpt_files[@]} -eq 0 ]; then
+    parent_checkpoint_dir="./results/${dataset_name}/model_cpk"
+    if [ -d "$parent_checkpoint_dir" ]; then
+        found_files=($(ls -t "${parent_checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
+        if [ ${#found_files[@]} -gt 0 ]; then
+            ckpt_files+=("${found_files[@]}")
+        fi
+    fi
 fi
 
 # 4. 如果还是没找到，在所有数据集目录中搜索匹配的采样器检查点（跨数据集查找）

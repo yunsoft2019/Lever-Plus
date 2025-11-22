@@ -1,4 +1,4 @@
-_target_: lever_lm.models.lstm_lever_lm.LSTMLeverLM
+_target_: lever_lm.models.v0.lstm_lever_lm.LSTMLeverLM
 
 emb_dim: 128
 dropout: 0.1

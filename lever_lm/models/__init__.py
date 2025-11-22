@@ -1,2 +1,9 @@
-from .gpt2_lever_lm import GPT2LeverLM
-from .lstm_lever_lm import LSTMLeverLM
+"""
+LeverLM Models Package
+
+向后兼容导入：从 v0 目录导入模型
+"""
+from .v0 import GPT2LeverLM, LSTMLeverLM
+
+__all__ = ['GPT2LeverLM', 'LSTMLeverLM']
+

@@ -4,6 +4,7 @@ gpu_id=${3:-0}
 lever_lm=${4:-query_img_icd_img_text}
 sampler=${5:-rand_sampler}
 beam_model=${6:-flamingo_3B}
+version=${7:-v0}
 
 # 将 GPU 编号转换为 PyTorch Lightning 的 devices 格式
 # 例如: 0 -> [0], 1 -> [1]
@@ -83,7 +84,8 @@ data_file_path="./results/${dataset_name}/generated_data/${data_file}"
 
 # 构建检查点保存路径和文件名
 # 完整的绝对路径（相对于项目根目录）
-checkpoint_dir="./results/${dataset_name}/model_cpk"
+# 添加版本目录支持：v0, v1, v2, v3, v4...
+checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
 # 文件名格式：模型_采样器_scorer_construct_order_beam_size_few_shot_candidate_num_sample_num
 # 将模型名称中的特殊字符替换为下划线，用于文件名
 model_name_safe=$(echo "$model_name" | sed 's/-/_/g' | sed 's/\./_/g')
@@ -98,6 +100,7 @@ echo "  Beam Model: ${beam_model} → ${model_name}"
 echo "  Sampler: ${sampler} → ${sampler_name}"
 echo "  Lever LM: ${lever_lm}"
 echo "  Sample Num: ${sample_num}"
+echo "  Version: ${version}"
 echo "=========================================="
 echo "Data file: ${data_file_path}"
 echo "Checkpoint will save to: ${checkpoint_dir}/${checkpoint_filename}_best.ckpt"

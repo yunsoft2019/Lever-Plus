@@ -6,6 +6,7 @@ dataset=${2:-okvqa_local}
 device_num=${3:-1}
 lever_lm=${4:-query_img_text_icd_img_text}
 sampler=${5:-rand_sampler}
+version=${6:-v0}
 
 # 将 sampler 转换为大驼峰格式（与实际生成的文件名匹配）
 case "$sampler" in
@@ -57,7 +58,8 @@ case "$dataset" in
 esac
 
 # 构建检查点目录和文件名模式
-checkpoint_dir="./results/${dataset_name}/model_cpk"
+# 添加版本目录支持：v0, v1, v2, v3, v4...
+checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
 checkpoint_filename_pattern="${model_name}_${sampler_name}_infoscore_left_beam5_shot2_cand64_sample${sample_num}"
 
 # 检查目录是否存在
@@ -103,7 +105,8 @@ ckpt_filename=$(basename "$ckpt_path")
 data_file="${task}-${dataset_name}-${model_name}-${sampler_name}-scorer:infoscore-construct_order:left-beam_size:5-few_shot:2-candidate_num:64-sample_num:${sample_num}.json"
 
 # 构建检查点保存路径和文件名
-checkpoint_save_dir="./results/${dataset_name}/model_cpk"
+# 添加版本目录支持：v0, v1, v2, v3, v4...
+checkpoint_save_dir="./results/${dataset_name}/model_cpk/${version}"
 checkpoint_filename="${checkpoint_filename_pattern}_resume"
 
 echo "=========================================="
@@ -117,6 +120,7 @@ echo "检查点路径: ${ckpt_path}"
 echo "数据文件: ${data_file}"
 echo "保存目录: ${checkpoint_save_dir}"
 echo "新检查点文件名: ${checkpoint_filename}"
+echo "版本: ${version}"
 echo "=========================================="
 
 # 在 ex_name 中包含采样器名称

@@ -5,6 +5,7 @@ device=${3:-0}
 lever_lm=${4:-query_img_icd_img_text}
 sampler=${5:-rand_sampler}
 beam_model=${6:-flamingo_3B}
+version=${7:-v0}
 
 # 固定批量大小为 1，避免批处理时的图像数量不匹配问题
 inference_bs=1
@@ -77,7 +78,8 @@ case "$dataset" in
 esac
 
 # 构建检查点目录和文件名模式
-checkpoint_dir="./results/${dataset_name}/model_cpk"
+# 添加版本目录支持：v0, v1, v2, v3, v4...
+checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
 # 将模型名称中的特殊字符替换为下划线，用于文件名匹配（与训练脚本一致）
 model_name_safe=$(echo "$model_name" | sed 's/-/_/g' | sed 's/\./_/g')
 checkpoint_filename_pattern="${model_name_safe}_${sampler_name}_infoscore_left_beam5_shot2_cand64_sample${sample_num}"
@@ -96,11 +98,24 @@ if [ ${#ckpt_files[@]} -eq 0 ]; then
     ckpt_files=($(ls -t "${checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
 fi
 
-# 4. 如果还是没找到，在所有数据集目录中搜索匹配的采样器检查点（跨数据集查找）
+# 4. 如果还是没找到，在当前版本目录的父目录中搜索（兼容旧文件）
 if [ ${#ckpt_files[@]} -eq 0 ]; then
-    echo "在当前数据集目录未找到检查点，尝试在所有数据集目录中搜索..."
-    # 搜索所有数据集目录
-    for dir in ./results/*/model_cpk; do
+    parent_checkpoint_dir="./results/${dataset_name}/model_cpk"
+    echo "在当前版本目录未找到检查点，尝试在父目录中搜索..."
+    if [ -d "$parent_checkpoint_dir" ]; then
+        found_files=($(ls -t "${parent_checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
+        if [ ${#found_files[@]} -gt 0 ]; then
+            ckpt_files+=("${found_files[@]}")
+            echo "  在 $parent_checkpoint_dir 中找到 ${#found_files[@]} 个匹配的检查点"
+        fi
+    fi
+fi
+
+# 5. 如果还是没找到，在所有数据集目录的版本目录中搜索匹配的采样器检查点（跨数据集查找）
+if [ ${#ckpt_files[@]} -eq 0 ]; then
+    echo "在当前数据集目录未找到检查点，尝试在所有数据集目录的版本目录中搜索..."
+    # 搜索所有数据集目录的版本目录
+    for dir in ./results/*/model_cpk/${version}; do
         if [ -d "$dir" ]; then
             found_files=($(ls -t "$dir"/*${sampler_name}*.ckpt 2>/dev/null))
             if [ ${#found_files[@]} -gt 0 ]; then
@@ -145,9 +160,10 @@ run_inference() {
     echo "  GPU ID: ${device} → ${device_arg}"
     echo "  Beam Model: ${beam_model} → ${model_name} (infer_model: ${infer_model})"
     echo "  Sampler: ${sampler} → ${sampler_name}"
-    echo "  Lever LM: ${lever_lm}"
-    echo "  Sample Num: ${sample_num}"
-    echo "=========================================="
+echo "  Lever LM: ${lever_lm}"
+echo "  Sample Num: ${sample_num}"
+echo "  Version: ${version}"
+echo "=========================================="
     
     if [ "${task}" == "vqa" ]; then
         echo "==========Begin: ${ex_name_prefix}_${lever_lm}-LeverLM==========" 

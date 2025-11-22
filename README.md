@@ -94,42 +94,50 @@ bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
 
 ### 2.2 训练
 
-**参数说明**: `task dataset gpu_id lever_lm sampler [beam_model]`
+**参数说明**: `task dataset gpu_id lever_lm sampler [beam_model] [version]`
 
 - `gpu_id`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
+- `version` 可选值: `v0` (默认), `v1`, `v2`, `v3`, `v4` - 模型版本号，用于区分不同版本的模型代码和检查点
 - **注意**: `beam_model` 必须与生成数据时使用的模型一致
+- **注意**: 检查点文件保存在 `results/{dataset}/model_cpk/{version}/` 目录下
 
 #### 使用 Flamingo-3B 生成的束搜索数据训练
 
 ```bash
-# 随机采样器（使用 GPU 0）
+# 随机采样器（使用 GPU 0，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
 
-# 文本相似度采样器（使用 GPU 1）
+# 文本相似度采样器（使用 GPU 1，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler flamingo_3B
 
-# 图片相似度采样器（使用 GPU 2）
+# 图片相似度采样器（使用 GPU 2，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler flamingo_3B
 
-# 混合采样器（使用 GPU 3）
+# 混合采样器（使用 GPU 3，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler flamingo_3B
+
+# 指定版本训练（例如使用 v1 版本）
+bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v1
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 生成的束搜索数据训练
 
 ```bash
-# 随机采样器（使用 GPU 0）
+# 随机采样器（使用 GPU 0，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
 
-# 文本相似度采样器（使用 GPU 1）
+# 文本相似度采样器（使用 GPU 1，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
 
-# 图片相似度采样器（使用 GPU 2）
+# 图片相似度采样器（使用 GPU 2，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
 
-# 混合采样器（使用 GPU 3）
+# 混合采样器（使用 GPU 3，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
+
+# 指定版本训练（例如使用 v1 版本）
+bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
 ```
 
 ### 2.3 基线
@@ -152,43 +160,51 @@ bash scripts/baseline.sh vqa okvqa_local 1 qwen2.5_vl_3B
 
 ### 2.4 推理
 
-**参数说明**: `task dataset device lever_lm sampler [beam_model]`
+**参数说明**: `task dataset device lever_lm sampler [beam_model] [version]`
 
 - `device`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
+- `version` 可选值: `v0` (默认), `v1`, `v2`, `v3`, `v4` - 模型版本号，必须与训练时使用的版本一致
 - **注意**: `beam_model` 必须与训练时使用的模型一致，用于选择对应的检查点文件
+- **注意**: `version` 必须与训练时使用的版本一致，用于从正确的目录加载检查点
 - **注意**: 推理时批量大小固定为1，避免批处理时的图像数量不匹配问题
 
 #### 使用 Flamingo-3B 训练的模型进行推理
 
 ```bash
-# 随机采样器（RandSampler）
+# 随机采样器（RandSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
 
-# 文本相似度采样器（TextSimSampler）
+# 文本相似度采样器（TextSimSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text text_sim_sampler flamingo_3B
 
-# 图片相似度采样器（ImgSimSampler）
+# 图片相似度采样器（ImgSimSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text img_sim_sampler flamingo_3B
 
-# 混合采样器（MixSampler）
+# 混合采样器（MixSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text mix_sampler flamingo_3B
+
+# 指定版本推理（例如使用 v1 版本）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v1
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 训练的模型进行推理
 
 ```bash
-# 随机采样器（RandSampler）
+# 随机采样器（RandSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
 
-# 文本相似度采样器（TextSimSampler）
+# 文本相似度采样器（TextSimSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
 
-# 图片相似度采样器（ImgSimSampler）
+# 图片相似度采样器（ImgSimSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
 
-# 混合采样器（MixSampler）
+# 混合采样器（MixSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
+
+# 指定版本推理（例如使用 v1 版本）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
 ```
 
 ## 3. 推理结果
