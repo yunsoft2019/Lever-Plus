@@ -48,6 +48,12 @@ pip install qwen_vl_utils
 
 ## 2. 执行脚本
 
+**重要提示**: 在执行脚本前需要下载相关模型参数。如果没有加速器，请先执行：
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+```
+
 ### 2.1 束搜索
 
 **参数说明**: `task dataset gpu_ids sampler [beam_model]`
@@ -70,36 +76,20 @@ bash scripts/generate_data.sh vqa okvqa_local "[0]" img_sim_sampler flamingo_3B
 bash scripts/generate_data.sh vqa okvqa_local "[0]" mix_sampler flamingo_3B
 ```
 
-#### 使用 Qwen2.5-VL-3B-Instruct 模型（后台运行）
+#### 使用 Qwen2.5-VL-3B-Instruct 模型
 
 ```bash
 # 随机采样器（RandSampler）
-bash scripts/run_generate_data_background.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
 
 # 文本相似度采样器（TextSimSampler）
-bash scripts/run_generate_data_background.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
 
 # 图片相似度采样器（ImgSimSampler）
-bash scripts/run_generate_data_background.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
 
 # 混合采样器（MixSampler）
-bash scripts/run_generate_data_background.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
-```
-
-#### 后台任务管理命令
-
-```bash
-# 列出所有运行中的任务
-bash scripts/manage_background_tasks.sh list
-
-# 停止指定PID的任务
-bash scripts/manage_background_tasks.sh stop <pid>
-
-# 停止所有generate_data任务
-bash scripts/manage_background_tasks.sh stop-all
-
-# 查看所有日志文件
-bash scripts/manage_background_tasks.sh logs
+bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
 ```
 
 ### 2.2 训练
@@ -142,7 +132,25 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img
 bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
 ```
 
-### 2.3 推理
+### 2.3 基线
+
+**参数说明**: `task dataset device model`
+
+- `device`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
+- `model`: 模型名称，可选值: `flamingo_3B` 或 `qwen2.5_vl_3B`
+- **说明**: 使用随机范例（RandomRetriever）进行基线推理
+- **Shot Num**: 自动测试 1, 2, 3, 4, 6, 8 个范例
+- **结果文件**: 保存在 `results/{dataset}/icl_inference/{model}_RandomRetriever_baseline_metrics.json`
+
+```bash
+# 基线推理（Flamingo-3B）
+bash scripts/baseline.sh vqa okvqa_local 0 flamingo_3B
+
+# 基线推理（Qwen2.5-VL-3B）
+bash scripts/baseline.sh vqa okvqa_local 1 qwen2.5_vl_3B
+```
+
+### 2.4 推理
 
 **参数说明**: `task dataset device lever_lm sampler [beam_model]`
 
@@ -185,7 +193,22 @@ bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_samp
 
 ## 3. 推理结果
 
-### 3.1 Flamingo-3B 模型结果
+### 3.1 基线推理结果（随机范例）
+
+使用随机范例（RandomRetriever）的基线结果：
+
+| Shot Num | Flamingo-3B | Qwen2.5-VL-3B-Instruct |
+|----------|-------------|------------------------|
+| 1        | -           | -                      |
+| 2        | -           | -                      |
+| 3        | -           | -                      |
+| 4        | -           | -                      |
+| 6        | -           | -                      |
+| 8        | -           | -                      |
+
+**说明**: 基线结果待补充
+
+### 3.2 Flamingo-3B 模型结果（LeverLM）
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
@@ -198,7 +221,7 @@ bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_samp
 
 **最佳结果**: 25.28% (RandSampler, shot_num=4)
 
-### 3.2 Qwen2.5-VL-3B-Instruct 模型结果
+### 3.3 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM）
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
@@ -211,7 +234,7 @@ bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_samp
 
 **最佳结果**: 52.04% (RandSampler, shot_num=1)
 
-### 3.3 结果说明
+### 3.4 结果说明
 
 - **数据集**: OKVQA
 - **训练参数**: infoscore_left_beam5_shot2_cand64_sample800
