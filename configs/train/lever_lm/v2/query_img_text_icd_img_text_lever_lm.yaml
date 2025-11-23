@@ -1,0 +1,21 @@
+_target_: lever_lm.models.v2.adapter_builder.build_model_v2_with_adapter
+
+# PointerSelectorV2Config 参数（传递给 build_model_v2 的 config 参数）
+config:
+  _target_: lever_lm.models.v2.pointer_selector_v2.PointerSelectorV2Config
+  d_model: 512 # Changed from 768 to 512 (CLIP base-patch32 outputs 512)
+  K: 2         # Changed from 32 to 2 (same as v1)
+  shot_num: 2  # Changed from 6 to 2 (same as v1)
+  label_smoothing: 0.0
+  dropout: 0.5
+  hidden_dim: 256
+  num_heads: 1
+  attn_dropout: 0.1
+
+# 适配器参数
+clip_name: openai/clip-vit-base-patch32
+query_encoding_flag: ['image', 'text']
+icd_encoding_flag: ['image', 'text']
+adapter: false
+norm: true
+

@@ -289,6 +289,7 @@ def main(cfg: DictConfig):
             cfg.result_dir,
             dataset_name,
             "icl_inference",
+            "baseline",  # 添加 baseline 子目录
         )
         os.makedirs(result_dir, exist_ok=True)
         model_name_safe = actual_model_name.replace('.', '_').replace('-', '_').replace('/', '_')

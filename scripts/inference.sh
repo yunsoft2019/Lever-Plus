@@ -145,6 +145,13 @@ run_inference() {
     # 在 ex_name 中包含采样器和模型名称，与训练脚本保持一致
     local ex_name_prefix="main_${task}_${sampler_name}_${model_name_safe}"
     
+    # 根据版本选择不同的配置文件（与训练脚本保持一致）
+    local train_config="${lever_lm}"
+    if [ "${version}" != "v0" ]; then
+        # v1, v2, v3, v4 使用对应的配置文件
+        train_config="${lever_lm}_${version}"
+    fi
+    
     # 将 GPU 编号转换为 device 格式（cuda:0, cuda:1 等）
     if [[ "$device" =~ ^[0-9]+$ ]]; then
         device_arg="cuda:${device}"
@@ -160,16 +167,17 @@ run_inference() {
     echo "  GPU ID: ${device} → ${device_arg}"
     echo "  Beam Model: ${beam_model} → ${model_name} (infer_model: ${infer_model})"
     echo "  Sampler: ${sampler} → ${sampler_name}"
-echo "  Lever LM: ${lever_lm}"
-echo "  Sample Num: ${sample_num}"
-echo "  Version: ${version}"
-echo "=========================================="
+    echo "  Lever LM: ${lever_lm}"
+    echo "  Train Config: ${train_config} (version: ${version})"
+    echo "  Sample Num: ${sample_num}"
+    echo "  Version: ${version}"
+    echo "=========================================="
     
     if [ "${task}" == "vqa" ]; then
-        echo "==========Begin: ${ex_name_prefix}_${lever_lm}-LeverLM==========" 
+        echo "==========Begin: ${ex_name_prefix}_${lever_lm}-LeverLM (version: ${version}, config: ${train_config})==========" 
         # 使用环境变量传递检查点路径，避免 Hydra 解析路径中的特殊字符
         # 根据 beam_model 选择对应的推理模型
-        python icl_inference.py train="${lever_lm}" \
+        python icl_inference.py train="${train_config}" \
                                 ex_name="${ex_name_prefix}_${lever_lm}" \
                                 dataset=${dataset} \
                                 task=${task} \
@@ -180,10 +188,10 @@ echo "=========================================="
                                 infer_model.load_from_local=false
 
     elif [ "${task}" == "caption" ]; then
-        echo "==========Begin: ${ex_name_prefix}_freeze_adapter_non_norm_${lever_lm}-LeverLM==========" 
+        echo "==========Begin: ${ex_name_prefix}_freeze_adapter_non_norm_${lever_lm}-LeverLM (version: ${version}, config: ${train_config})==========" 
         # 使用环境变量传递检查点路径，避免 Hydra 解析路径中的特殊字符
         # 根据 beam_model 选择对应的推理模型
-        python icl_inference.py train="${lever_lm}" \
+        python icl_inference.py train="${train_config}" \
                                 ex_name="${ex_name_prefix}_freeze_adapter_non_norm_${lever_lm}" \
                                 dataset=${dataset} \
                                 task=${task} \

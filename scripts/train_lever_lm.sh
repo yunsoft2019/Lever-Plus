@@ -111,10 +111,17 @@ run_train() {
  
     # 在 ex_name 中包含采样器和模型名称，避免不同配置互相覆盖
     local ex_name_prefix="main_${task}_${sampler_name}_${model_name_safe}"
+    
+    # 根据版本选择不同的配置文件
+    local train_config="${lever_lm}"
+    if [ "${version}" != "v0" ]; then
+        # v1, v2, v3, v4 使用对应的配置文件
+        train_config="${lever_lm}_${version}"
+    fi
 
     if [ "${task}" == "vqa" ]; then
-        echo "==========Begin: ${ex_name_prefix}-LeverLM: ${lever_lm}==========" 
-        python train.py train="${lever_lm}" \
+        echo "==========Begin: ${ex_name_prefix}-LeverLM: ${train_config} (version: ${version})==========" 
+        python train.py train="${train_config}" \
                         data_files="${data_file}" \
                         trainer_args.max_epochs=20 \
                         trainer_args.val_check_interval=0.25 \
@@ -128,8 +135,8 @@ run_train() {
                         +use_simple_logger=true 2>&1 | grep -v "UserWarning\|FutureWarning\|DeprecationWarning\|Found.*module.*eval mode"
 
     elif [ "${task}" == "caption" ]; then
-        echo "==========Begin: ${ex_name_prefix}-LeverLM: ${lever_lm}==========" 
-        python train.py train="${lever_lm}" \
+        echo "==========Begin: ${ex_name_prefix}-LeverLM: ${train_config} (version: ${version})==========" 
+        python train.py train="${train_config}" \
                         data_files="${data_file}" \
                         trainer_args.max_epochs=20 \
                         trainer_args.val_check_interval=0.25 \

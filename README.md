@@ -117,8 +117,11 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img
 # 混合采样器（使用 GPU 3，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler flamingo_3B
 
-# 指定版本训练（例如使用 v1 版本）
-bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v1
+# v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v1
+
+# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 生成的束搜索数据训练
@@ -136,8 +139,11 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img
 # 混合采样器（使用 GPU 3，默认版本 v0）
 bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
 
-# 指定版本训练（例如使用 v1 版本）
-bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
+# v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
+
+# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
 ```
 
 ### 2.3 基线
@@ -184,8 +190,11 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text img_sim_
 # 混合采样器（MixSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text mix_sampler flamingo_3B
 
-# 指定版本推理（例如使用 v1 版本）
+# v1版本推理（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v1
+
+# v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 训练的模型进行推理
@@ -203,8 +212,11 @@ bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_
 # 混合采样器（MixSampler，默认版本 v0）
 bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
 
-# 指定版本推理（例如使用 v1 版本）
+# v1版本推理（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
+
+# v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
 ```
 
 ## 3. 推理结果
@@ -215,16 +227,22 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 | Shot Num | Flamingo-3B | Qwen2.5-VL-3B-Instruct |
 |----------|-------------|------------------------|
-| 1        | -           | -                      |
-| 2        | -           | -                      |
-| 3        | -           | -                      |
-| 4        | -           | -                      |
-| 6        | -           | -                      |
-| 8        | -           | -                      |
+| 1        | 19.96       | **50.59**              |
+| 2        | 20.50       | 47.04                  |
+| 3        | 21.68       | 45.48                  |
+| 4        | 22.33       | 44.93                  |
+| 6        | **23.06**   | 44.36                  |
+| 8        | 22.95       | 44.14                  |
 
-**说明**: 基线结果待补充
+**说明**: 
+- **Flamingo-3B**: 最佳结果为 23.06% (shot_num=6)
+- **Qwen2.5-VL-3B-Instruct**: 最佳结果为 50.59% (shot_num=1)
 
-### 3.2 Flamingo-3B 模型结果（LeverLM）
+### 3.2 v0 推理结果
+
+**模型说明**: v0 模型基于 GPT2 自回归语言模型架构，使用 CLIP 编码器编码 query 和 ICD（In-Context Demonstration），通过自回归生成的方式选择范例索引序列。
+
+#### 3.2.1 Flamingo-3B 模型结果（LeverLM v0）
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
@@ -237,7 +255,7 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 **最佳结果**: 25.28% (RandSampler, shot_num=4)
 
-### 3.3 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM）
+#### 3.2.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v0）
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
@@ -250,9 +268,48 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 **最佳结果**: 52.04% (RandSampler, shot_num=1)
 
-### 3.4 结果说明
+### 3.3 v1 推理结果
+
+**模型说明**: v1 模型采用 Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例，支持 Teacher Forcing 训练。
+
+#### 3.3.1 Flamingo-3B 模型结果（LeverLM v1）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | 21.96       | -              | -             | -          |
+| 2        | 22.03       | -              | -             | -          |
+| 3        | 22.64       | -              | -             | -          |
+| 4        | 22.76       | -              | -             | -          |
+| 6        | **22.84**   | -              | -             | -          |
+| 8        | 21.51       | -              | -             | -          |
+
+**最佳结果**: 22.84% (RandSampler, shot_num=6)
+
+#### 3.3.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v1）
+
+**说明**: Qwen2.5-VL-3B-Instruct v1 推理结果待补充
+
+### 3.4 v2 推理结果
+
+**模型说明**: v2 模型在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性，从而更准确地从候选池中选择相关范例。
+
+**说明**: v2 推理结果待补充
+
+### 3.5 v3 推理结果
+
+**说明**: v3 推理结果待补充
+
+### 3.6 v4 推理结果
+
+**说明**: v4 推理结果待补充
+
+### 3.7 结果说明
 
 - **数据集**: OKVQA
 - **训练参数**: infoscore_left_beam5_shot2_cand64_sample800
-- **Flamingo-3B**: 最佳配置为 RandSampler + shot_num=4，准确率 25.28%
-- **Qwen2.5-VL-3B-Instruct**: 最佳配置为 RandSampler + shot_num=1，准确率 52.04%
+- **基线结果**:
+  - Flamingo-3B: 最佳结果为 23.06% (shot_num=6)
+  - Qwen2.5-VL-3B-Instruct: 最佳结果为 50.59% (shot_num=1)
+- **v0 模型结果**:
+  - Flamingo-3B: 最佳配置为 RandSampler + shot_num=4，准确率 25.28%
+  - Qwen2.5-VL-3B-Instruct: 最佳配置为 RandSampler + shot_num=1，准确率 52.04%

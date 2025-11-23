@@ -467,6 +467,25 @@ def main(cfg: DictConfig):
             lever_lm_path = get_lever_lm_path(cfg)
             checkpoint_info = parse_checkpoint_filename(lever_lm_path)
             
+            # 从检查点路径中提取版本信息
+            # 路径格式: ./results/{dataset}/model_cpk/{version}/...
+            version = "v0"  # 默认版本
+            if lever_lm_path:
+                path_parts = lever_lm_path.split('/')
+                if 'model_cpk' in path_parts:
+                    idx = path_parts.index('model_cpk')
+                    if idx + 1 < len(path_parts):
+                        potential_version = path_parts[idx + 1]
+                        # 检查是否是版本格式（v0, v1, v2, v3, v4）
+                        if potential_version.startswith('v') and len(potential_version) <= 3:
+                            try:
+                                # 验证版本号是否有效（v0-v4）
+                                version_num = int(potential_version[1:])
+                                if 0 <= version_num <= 4:
+                                    version = potential_version
+                            except ValueError:
+                                pass
+            
             dataset_name = cfg.dataset.name.replace('_local', '')
             infer_model_name = cfg.infer_model.name
             sampler_name = checkpoint_info.get('sampler_name')
@@ -474,13 +493,15 @@ def main(cfg: DictConfig):
             
             if sampler_name and training_params:
                 result_filename = f"{infer_model_name}_{sampler_name}_{training_params}_metrics.json"
+                # 添加版本目录：results/{dataset}/icl_inference/{version}/
                 result_dir = os.path.join(
                     cfg.result_dir,
                     dataset_name,
                     "icl_inference",
+                    version,  # 添加版本目录（v0, v1, v2, v3, v4）
                 )
                 result_json_path = os.path.join(result_dir, result_filename)
-                logger.info(f"使用新路径格式: {result_json_path}")
+                logger.info(f"使用新路径格式（版本: {version}）: {result_json_path}")
             else:
                 logger.warning(f"无法从检查点文件名解析信息，使用旧路径格式")
                 result_dir = os.path.join(
