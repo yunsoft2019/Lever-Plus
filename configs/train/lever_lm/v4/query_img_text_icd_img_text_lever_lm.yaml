@@ -1,0 +1,31 @@
+_target_: lever_lm.models.v4.adapter_builder.build_model_v4_with_adapter
+
+# PointerSelectorV4Config 参数（传递给 build_model_v4 的 config 参数）
+config:
+  _target_: lever_lm.models.v4.pointer_selector_v4.PointerSelectorV4Config
+  d_model: 512 # Changed from 768 to 512 (CLIP base-patch32 outputs 512)
+  K: 2         # Changed from 32 to 2 (same as v1/v2/v3)
+  shot_num: 2  # Changed from 6 to 2 (same as v1/v2/v3)
+  label_smoothing: 0.0
+  dropout: 0.5
+  base_architecture: v2  # 使用 v2 作为基础架构（包含 Cross-Attention）
+  use_cross_attention: null  # None 时根据 base_architecture 自动设置
+  ranking_loss_type: listwise  # 'listwise' 或 'pairwise'
+  ranking_loss_weight: 0.5
+  ce_weight: 0.5
+  # V4 特有参数（离线强化学习）
+  enable_rce: false  # 是否启用 RCE（Reward-weighted Cross-Entropy）热身
+  enable_grpo: false  # 是否启用 GRPO（Group-Relative Policy Optimization）
+  rce_temperature: 1.0
+  ppo_epsilon: 0.2
+  advantage_clip: 5.0
+  kl_beta: 0.01
+  reward_norm: zscore  # 'zscore' 或 'minmax'
+
+# 适配器参数
+clip_name: openai/clip-vit-base-patch32
+query_encoding_flag: ['image', 'text']
+icd_encoding_flag: ['image', 'text']
+adapter: false
+norm: true
+

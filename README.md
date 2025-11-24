@@ -122,6 +122,12 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 
 # v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2
+
+# v3版本训练（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v3
+
+# v4版本训练（V3 + 离线强化学习，在 v3 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v4
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 生成的束搜索数据训练
@@ -144,6 +150,12 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 
 # v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
+
+# v3版本训练（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+
+# v4版本训练（V3 + 离线强化学习，在 v3 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4
 ```
 
 ### 2.3 基线
@@ -195,6 +207,12 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 # v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v2
+
+# v3版本推理（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v3
+
+# v4版本推理（V3 + 离线强化学习，在 v3 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v4
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 训练的模型进行推理
@@ -217,6 +235,12 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 # v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
+
+# v3版本推理（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+
+# v4版本推理（V3 + 离线强化学习，在 v3 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4
 ```
 
 ## 3. 推理结果
@@ -287,21 +311,106 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 #### 3.3.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v1）
 
-**说明**: Qwen2.5-VL-3B-Instruct v1 推理结果待补充
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | **48.63**   | -              | -             | -          |
+| 2        | 47.26       | -              | -             | -          |
+| 3        | 47.58       | -              | -             | -          |
+| 4        | 47.27       | -              | -             | -          |
+| 6        | 46.56       | -              | -             | -          |
+| 8        | 46.63       | -              | -             | -          |
+
+**最佳结果**: 48.63% (RandSampler, shot_num=1)
 
 ### 3.4 v2 推理结果
 
 **模型说明**: v2 模型在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性，从而更准确地从候选池中选择相关范例。
 
-**说明**: v2 推理结果待补充
+#### 3.4.1 Flamingo-3B 模型结果（LeverLM v2）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | 21.96       | -              | -             | -          |
+| 2        | 22.03       | -              | -             | -          |
+| 3        | 22.64       | -              | -             | -          |
+| 4        | 22.76       | -              | -             | -          |
+| 6        | **22.84**   | -              | -             | -          |
+| 8        | 21.51       | -              | -             | -          |
+
+**最佳结果**: 22.84% (RandSampler, shot_num=6)
+
+#### 3.4.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v2）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | **51.32**   | -              | -             | -          |
+| 2        | 47.23       | -              | -             | -          |
+| 3        | 46.86       | -              | -             | -          |
+| 4        | 46.94       | -              | -             | -          |
+| 6        | 46.08       | -              | -             | -          |
+| 8        | 45.89       | -              | -             | -          |
+
+**最佳结果**: 51.32% (RandSampler, shot_num=1)
 
 ### 3.5 v3 推理结果
 
-**说明**: v3 推理结果待补充
+**模型说明**: v3 模型采用灵活基础架构 + 排序学习（Ranking Learning）设计，可选择 v1（Bi-Encoder）或 v2（+ Cross-Attention）作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵（CE）+ 排序损失（Ranking Loss），通过 Listwise 或 Pairwise 方式提升 Top-k、NDCG、MRR 等排序指标。
+
+#### 3.5.1 Flamingo-3B 模型结果（LeverLM v3）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | -           | -              | -             | -          |
+| 2        | -           | -              | -             | -          |
+| 3        | -           | -              | -             | -          |
+| 4        | -           | -              | -             | -          |
+| 6        | -           | -              | -             | -          |
+| 8        | -           | -              | -             | -          |
+
+**说明**: Flamingo-3B v3 推理结果待补充
+
+#### 3.5.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v3）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | -           | -              | -             | -          |
+| 2        | -           | -              | -             | -          |
+| 3        | -           | -              | -             | -          |
+| 4        | -           | -              | -             | -          |
+| 6        | -           | -              | -             | -          |
+| 8        | -           | -              | -             | -          |
+
+**说明**: Qwen2.5-VL-3B-Instruct v3 推理结果待补充
 
 ### 3.6 v4 推理结果
 
-**说明**: v4 推理结果待补充
+**模型说明**: v4 模型在 v3（灵活基础架构 + 排序学习）的基础上，新增离线强化学习阶段：先 RCE（Reward-weighted Cross-Entropy）预热，再 GRPO（Group-Relative Policy Optimization with PPO-style clipping + KL 正则）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标（VQA Acc），期望在 v3 基础上进一步提升排序质量与 VQA 准确率（通常 0.2%~1.0% 额外增益）。
+
+#### 3.6.1 Flamingo-3B 模型结果（LeverLM v4）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | -           | -              | -             | -          |
+| 2        | -           | -              | -             | -          |
+| 3        | -           | -              | -             | -          |
+| 4        | -           | -              | -             | -          |
+| 6        | -           | -              | -             | -          |
+| 8        | -           | -              | -             | -          |
+
+**说明**: Flamingo-3B v4 推理结果待补充
+
+#### 3.6.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v4）
+
+| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|----------|-------------|----------------|---------------|------------|
+| 1        | -           | -              | -             | -          |
+| 2        | -           | -              | -             | -          |
+| 3        | -           | -              | -             | -          |
+| 4        | -           | -              | -             | -          |
+| 6        | -           | -              | -             | -          |
+| 8        | -           | -              | -             | -          |
+
+**说明**: Qwen2.5-VL-3B-Instruct v4 推理结果待补充
 
 ### 3.7 结果说明
 
