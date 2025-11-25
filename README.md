@@ -164,9 +164,9 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 
 - `device`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
 - `model`: 模型名称，可选值: `flamingo_3B` 或 `qwen2.5_vl_3B`
-- **说明**: 使用随机范例（RandomRetriever）进行基线推理
-- **Shot Num**: 自动测试 1, 2, 3, 4, 6, 8 个范例
-- **结果文件**: 保存在 `results/{dataset}/icl_inference/{model}_RandomRetriever_baseline_metrics.json`
+- **说明**: 使用随机范例（RandomRetriever）进行基线推理，从整个训练集中随机选择范例
+- **Shot Num**: 自动测试 1, 2, 3, 4 个范例
+- **结果文件**: 保存在 `results/{dataset}/icl_inference/baseline/{model}_RandomRetriever_baseline_metrics.json`
 
 ```bash
 # 基线推理（Flamingo-3B）
@@ -186,6 +186,22 @@ bash scripts/baseline.sh vqa okvqa_local 1 qwen2.5_vl_3B
 - **注意**: `beam_model` 必须与训练时使用的模型一致，用于选择对应的检查点文件
 - **注意**: `version` 必须与训练时使用的版本一致，用于从正确的目录加载检查点
 - **注意**: 推理时批量大小固定为1，避免批处理时的图像数量不匹配问题
+
+**后台运行**: 推理任务通常需要较长时间，建议使用后台运行脚本 `scripts/run_inference_background.sh`，该脚本会自动激活 conda 环境并将输出保存到日志文件。
+
+```bash
+# 后台运行推理任务
+bash scripts/run_inference_background.sh vqa okvqa_local 3 query_img_text_icd_img_text text_sim_sampler flamingo_3B v1
+
+# 查看实时日志
+tail -f logs/inference/inference_vqa_okvqa_local_3_text_sim_sampler_flamingo_3B_v1_*.log
+
+# 查看进程状态
+ps -p <PID>
+
+# 停止任务（如果需要）
+kill <PID>
+```
 
 #### 使用 Flamingo-3B 训练的模型进行推理
 
@@ -254,12 +270,10 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 1        | 19.96       | **50.59**              |
 | 2        | 20.50       | 47.04                  |
 | 3        | 21.68       | 45.48                  |
-| 4        | 22.33       | 44.93                  |
-| 6        | **23.06**   | 44.36                  |
-| 8        | 22.95       | 44.14                  |
+| 4        | **22.33**   | 44.93                  |
 
 **说明**: 
-- **Flamingo-3B**: 最佳结果为 23.06% (shot_num=6)
+- **Flamingo-3B**: 最佳结果为 22.33% (shot_num=4)
 - **Qwen2.5-VL-3B-Instruct**: 最佳结果为 50.59% (shot_num=1)
 
 ### 3.2 v0 推理结果
@@ -274,8 +288,6 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 2        | 20.97       | 21.89          | **23.06**     | 20.94      |
 | 3        | 23.29       | 22.94          | **23.63**     | 20.31      |
 | 4        | **25.28**   | 24.14          | 24.59         | 22.87      |
-| 6        | **24.45**   | 24.0           | 23.93         | 23.25      |
-| 8        | **24.68**   | 24.11          | 24.06         | 24.24      |
 
 **最佳结果**: 25.28% (RandSampler, shot_num=4)
 
@@ -287,8 +299,6 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 2        | 49.76       | 44.66          | 43.98         | **46.36**  |
 | 3        | 48.06       | 43.54          | 42.55         | 45.36      |
 | 4        | 47.60       | 41.76          | 42.12         | 44.08      |
-| 6        | 46.55       | 42.90          | 42.39         | 44.26      |
-| 8        | 46.52       | 42.60          | 42.53         | 43.65      |
 
 **最佳结果**: 52.04% (RandSampler, shot_num=1)
 
@@ -300,14 +310,12 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
-| 1        | 21.96       | -              | -             | -          |
-| 2        | 22.03       | -              | -             | -          |
-| 3        | 22.64       | -              | -             | -          |
-| 4        | 22.76       | -              | -             | -          |
-| 6        | **22.84**   | -              | -             | -          |
-| 8        | 21.51       | -              | -             | -          |
+| 1        | 21.96       | 19.71          | 21.96         | 19.71      |
+| 2        | 22.03       | 22.59          | 22.03         | 22.59      |
+| 3        | 22.64       | 23.32          | 22.64         | 23.32      |
+| 4        | 22.76       | **24.29**      | 22.76         | **24.29**  |
 
-**最佳结果**: 22.84% (RandSampler, shot_num=6)
+**最佳结果**: 24.29% (TextSimSampler/MixSampler, shot_num=4)
 
 #### 3.3.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v1）
 
@@ -317,8 +325,6 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 2        | 47.26       | -              | -             | -          |
 | 3        | 47.58       | -              | -             | -          |
 | 4        | 47.27       | -              | -             | -          |
-| 6        | 46.56       | -              | -             | -          |
-| 8        | 46.63       | -              | -             | -          |
 
 **最佳结果**: 48.63% (RandSampler, shot_num=1)
 
@@ -333,11 +339,9 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 1        | 21.96       | -              | -             | -          |
 | 2        | 22.03       | -              | -             | -          |
 | 3        | 22.64       | -              | -             | -          |
-| 4        | 22.76       | -              | -             | -          |
-| 6        | **22.84**   | -              | -             | -          |
-| 8        | 21.51       | -              | -             | -          |
+| 4        | **22.76**    | -              | -             | -          |
 
-**最佳结果**: 22.84% (RandSampler, shot_num=6)
+**最佳结果**: 22.76% (RandSampler, shot_num=4)
 
 #### 3.4.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v2）
 
@@ -347,8 +351,6 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 2        | 47.23       | -              | -             | -          |
 | 3        | 46.86       | -              | -             | -          |
 | 4        | 46.94       | -              | -             | -          |
-| 6        | 46.08       | -              | -             | -          |
-| 8        | 45.89       | -              | -             | -          |
 
 **最佳结果**: 51.32% (RandSampler, shot_num=1)
 
@@ -360,27 +362,23 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
-| 1        | -           | -              | -             | -          |
-| 2        | -           | -              | -             | -          |
-| 3        | -           | -              | -             | -          |
-| 4        | -           | -              | -             | -          |
-| 6        | -           | -              | -             | -          |
-| 8        | -           | -              | -             | -          |
+| 1        | 21.98       | -              | -             | -          |
+| 2        | 22.03       | -              | -             | -          |
+| 3        | 22.64       | -              | -             | -          |
+| 4        | **22.76**    | -              | -             | -          |
 
-**说明**: Flamingo-3B v3 推理结果待补充
+**最佳结果**: 22.76% (RandSampler, shot_num=4)
 
 #### 3.5.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v3）
 
 | Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |----------|-------------|----------------|---------------|------------|
-| 1        | -           | -              | -             | -          |
-| 2        | -           | -              | -             | -          |
-| 3        | -           | -              | -             | -          |
-| 4        | -           | -              | -             | -          |
-| 6        | -           | -              | -             | -          |
-| 8        | -           | -              | -             | -          |
+| 1        | **51.33**   | -              | -             | -          |
+| 2        | 47.23       | -              | -             | -          |
+| 3        | 46.86       | -              | -             | -          |
+| 4        | 46.94       | -              | -             | -          |
 
-**说明**: Qwen2.5-VL-3B-Instruct v3 推理结果待补充
+**最佳结果**: 51.33% (RandSampler, shot_num=1)
 
 ### 3.6 v4 推理结果
 
@@ -394,8 +392,6 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 2        | -           | -              | -             | -          |
 | 3        | -           | -              | -             | -          |
 | 4        | -           | -              | -             | -          |
-| 6        | -           | -              | -             | -          |
-| 8        | -           | -              | -             | -          |
 
 **说明**: Flamingo-3B v4 推理结果待补充
 
@@ -407,8 +403,6 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 | 2        | -           | -              | -             | -          |
 | 3        | -           | -              | -             | -          |
 | 4        | -           | -              | -             | -          |
-| 6        | -           | -              | -             | -          |
-| 8        | -           | -              | -             | -          |
 
 **说明**: Qwen2.5-VL-3B-Instruct v4 推理结果待补充
 
@@ -416,9 +410,12 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 - **数据集**: OKVQA
 - **训练参数**: infoscore_left_beam5_shot2_cand64_sample800
-- **基线结果**:
-  - Flamingo-3B: 最佳结果为 23.06% (shot_num=6)
+- **基线结果**（从整个训练集中随机选择）:
+  - Flamingo-3B: 最佳结果为 22.33% (shot_num=4)
   - Qwen2.5-VL-3B-Instruct: 最佳结果为 50.59% (shot_num=1)
-- **v0 模型结果**:
+- **v0 模型结果**（从64个候选范例中，通过束搜索+SFT选择）:
   - Flamingo-3B: 最佳配置为 RandSampler + shot_num=4，准确率 25.28%
   - Qwen2.5-VL-3B-Instruct: 最佳配置为 RandSampler + shot_num=1，准确率 52.04%
+
+**结果对比分析**:
+- **基线 vs 方法**: 束搜索+SFT相比基线（从整个训练集随机选择）提升了约2-3个百分点，说明束搜索+SFT方法有效

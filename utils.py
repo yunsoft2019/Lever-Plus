@@ -428,9 +428,22 @@ def init_lever_lm(cfg, lever_lm_path):
         cfg.train.lever_lm.index_ds_size = saved_index_ds_size
         logger.info(f"使用 index_ds_size: {saved_index_ds_size} 来初始化模型")
     
-    lever_lm = hydra.utils.instantiate(cfg.train.lever_lm)
+    # 如果配置中有 device，在实例化模型时传递 device 参数，确保 CLIP 模型加载到正确的 GPU
+    instantiate_kwargs = {}
+    if hasattr(cfg, 'device') and cfg.device:
+        instantiate_kwargs['device'] = cfg.device
+        logger.info(f"将在设备 {cfg.device} 上初始化模型（包括 CLIP 模型）")
+    
+    lever_lm = hydra.utils.instantiate(cfg.train.lever_lm, **instantiate_kwargs)
     state_dict = checkpoint["state_dict"]
     state_dict = {k.replace("lever_lm.", ""): v for k, v in state_dict.items()}
     lever_lm.load_state_dict(state_dict)
+    
+    # 如果配置中有 device，将模型移动到该设备（确保所有子模块包括 CLIP 模型都在正确的设备上）
+    if hasattr(cfg, 'device') and cfg.device:
+        device = cfg.device
+        lever_lm = lever_lm.to(device)
+        logger.info(f"已将模型移动到设备: {device}")
+    
     processor = AutoProcessor.from_pretrained(cfg.train.lever_lm.clip_name)
     return lever_lm, processor

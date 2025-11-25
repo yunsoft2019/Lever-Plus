@@ -131,6 +131,7 @@ run_train() {
                         trainer_args.devices=${devices_arg} \
                         dataset=${dataset} \
                         task=${task} \
+                        lr=1e-4 \
                         +use_wandb=false \
                         +use_simple_logger=true 2>&1 | grep -v "UserWarning\|FutureWarning\|DeprecationWarning\|Found.*module.*eval mode"
 
@@ -144,6 +145,7 @@ run_train() {
                         trainer_args.devices=${devices_arg} \
                         dataset=${dataset} \
                         task=${task} \
+                        lr=1e-4 \
                         train.lever_lm.norm=false \
                         train.lever_lm.freeze_prefix_list="[img_model,sen_model]" \
                         train.lever_lm.adapter=true \

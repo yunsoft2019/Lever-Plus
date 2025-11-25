@@ -44,6 +44,7 @@ class PointerSelectorAdapter(nn.Module):
         adapter: bool = False,
         norm: bool = True,
         K: int = 32,  # 候选池大小
+        device: Optional[str] = None,  # 设备参数，用于确保 CLIP 模型加载到正确的 GPU
     ):
         super().__init__()
         
@@ -57,15 +58,24 @@ class PointerSelectorAdapter(nn.Module):
         # 加载 CLIP 模型用于提取 embeddings
         self.clip_name = clip_name
         
+        # 确定设备：如果提供了 device，使用它；否则使用 pointer_selector 的设备
+        if device is None:
+            # 尝试从 pointer_selector 获取设备
+            if hasattr(pointer_selector_model, 'device'):
+                device = pointer_selector_model.device
+            else:
+                # 默认使用 CPU，后续会在 LeverLMRetriever 中移动到正确设备
+                device = 'cpu'
+        
         # 文本编码器
         self.sen_model = None
         self.sen_adapter = None
         if "text" in self.query_encoding_flag or "text" in self.icd_encoding_flag:
-            self.sen_model = CLIPTextModelWithProjection.from_pretrained(clip_name)
+            self.sen_model = CLIPTextModelWithProjection.from_pretrained(clip_name).to(device)
             if adapter:
                 # 如果需要 adapter，创建简单的线性层
                 d_model = self.sen_model.config.projection_dim
-                self.sen_adapter = nn.Linear(d_model, d_model)
+                self.sen_adapter = nn.Linear(d_model, d_model).to(device)
             else:
                 self.sen_adapter = nn.Identity()
             # 冻结 CLIP 模型参数（只训练 pointer selector）
@@ -76,10 +86,10 @@ class PointerSelectorAdapter(nn.Module):
         self.img_model = None
         self.img_adapter = None
         if "image" in self.query_encoding_flag or "image" in self.icd_encoding_flag:
-            self.img_model = CLIPVisionModelWithProjection.from_pretrained(clip_name)
+            self.img_model = CLIPVisionModelWithProjection.from_pretrained(clip_name).to(device)
             if adapter:
                 d_model = self.img_model.config.projection_dim
-                self.img_adapter = nn.Linear(d_model, d_model)
+                self.img_adapter = nn.Linear(d_model, d_model).to(device)
             else:
                 self.img_adapter = nn.Identity()
             # 冻结 CLIP 模型参数（只训练 pointer selector）

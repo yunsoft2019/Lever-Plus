@@ -213,7 +213,7 @@ def main(cfg: DictConfig):
     models_to_test = [infer_model_config]
     logger.info(f"测试模型: {infer_model_config}")
     
-    shot_num_list = [1, 2, 3, 4, 6, 8]
+    shot_num_list = [1, 2, 3, 4]
     
     # 检查配置文件中的路径
     val_ques_path = cfg.dataset.get('val_ques_path', None)

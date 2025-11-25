@@ -15,6 +15,7 @@ def build_model_v1_with_adapter(
     icd_encoding_flag: Optional[list] = None,
     adapter: bool = False,
     norm: bool = True,
+    device: Optional[str] = None,  # 设备参数，用于确保 CLIP 模型加载到正确的 GPU
     **kwargs
 ) -> PointerSelectorAdapter:
     """
@@ -44,7 +45,8 @@ def build_model_v1_with_adapter(
             K=config_dict['K'],
             shot_num=config_dict['shot_num'],
             label_smoothing=config_dict.get('label_smoothing', 0.0),
-            dropout=config_dict.get('dropout', 0.5)
+            dropout=config_dict.get('dropout', 0.08),
+            temperature=config_dict.get('temperature', 0.5)
         )
     
     # 构建 v1 模型
@@ -70,6 +72,7 @@ def build_model_v1_with_adapter(
         adapter=adapter,
         norm=norm,
         K=pointer_config.K,
+        device=device,  # 传递 device 参数，确保 CLIP 模型加载到正确的 GPU
     )
     
     return adapter_model

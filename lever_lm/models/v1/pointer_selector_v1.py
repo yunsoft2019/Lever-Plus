@@ -29,7 +29,8 @@ class PointerSelectorV1(nn.Module):
         K: int = 32,
         shot_num: int = 6,
         label_smoothing: float = 0.0,
-        dropout: float = 0.5
+        dropout: float = 0.08,
+        temperature: float = 0.5
     ):
         super().__init__()
 
@@ -58,8 +59,12 @@ class PointerSelectorV1(nn.Module):
             nn.LayerNorm(d_model)
         )
 
-        # 温度参数（固定为0.1）
-        self.temperature = 0.1
+        # 温度参数（可配置，默认0.5，比原来的0.1更平滑）
+        self.temperature = temperature
+        
+        # Query更新权重（可学习的融合权重，而不是固定的0.5/0.5）
+        # 使用sigmoid确保权重在(0,1)范围内，初始化为0.6（更偏向保留原始query）
+        self.query_update_weight = nn.Parameter(torch.tensor(0.6))
 
         self._init_weights()
 
@@ -68,11 +73,11 @@ class PointerSelectorV1(nn.Module):
         print(f"  - K (候选池大小): {K}")
         print(f"  - shot_num: {shot_num}")
         print(f"  - label_smoothing: {label_smoothing}")
-        print(f"  - dropout: {dropout}")
-        print(f"  - temperature: {self.temperature}")
+        print(f"  - dropout: {dropout} (降低以保留更多信息)")
+        print(f"  - temperature: {self.temperature} (提高以平滑softmax)")
         total_params = sum(p.numel() for p in self.parameters())
         print(f"  - 参数量: {total_params/1e6:.2f}M")
-        print(f"  - 架构: Bi-Encoder (简单双塔)")
+        print(f"  - 架构: Bi-Encoder (改进版：加权融合query更新)")
 
 
     def _init_weights(self):
@@ -156,8 +161,10 @@ class PointerSelectorV1(nn.Module):
                 # 更新 query（加入预测的候选）
                 next_icd = torch.gather(cand_proj, 1, pred.view(batch_size, 1, 1).expand(-1, -1, self.d_model)).squeeze(1)
             
-            # 更新 current_query（简单平均）
-            current_query = (current_query + next_icd) / 2.0
+            # 更新 current_query（使用可学习的加权融合）
+            # 使用sigmoid确保权重在(0,1)范围内，让模型学习最优的融合比例
+            alpha = torch.sigmoid(self.query_update_weight)  # query的权重（可学习）
+            current_query = alpha * current_query + (1 - alpha) * next_icd
             current_query = F.normalize(current_query, dim=-1)
         
         all_logits = torch.stack(all_logits, dim=1)  # [B, shot_num, K]
@@ -238,13 +245,15 @@ class PointerSelectorV1Config:
         K: int = 32,
         shot_num: int = 6,
         label_smoothing: float = 0.0,
-        dropout: float = 0.5
+        dropout: float = 0.08,
+        temperature: float = 0.5
     ):
         self.d_model = d_model
         self.K = K
         self.shot_num = shot_num
         self.label_smoothing = label_smoothing
         self.dropout = dropout
+        self.temperature = temperature
     
     def to_dict(self):
         """转换为字典（用于保存检查点）"""
@@ -253,7 +262,8 @@ class PointerSelectorV1Config:
             'K': self.K,
             'shot_num': self.shot_num,
             'label_smoothing': self.label_smoothing,
-            'dropout': self.dropout
+            'dropout': self.dropout,
+            'temperature': self.temperature
         }
 
 
@@ -264,6 +274,7 @@ def build_model_v1(config: PointerSelectorV1Config) -> PointerSelectorV1:
         K=config.K,
         shot_num=config.shot_num,
         label_smoothing=config.label_smoothing,
-        dropout=config.dropout
+        dropout=config.dropout,
+        temperature=config.temperature
     )
     return model
