@@ -120,7 +120,7 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix
 # v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v1
 
-# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 
 # v3版本训练（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
@@ -148,7 +148,7 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix
 # v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
 
-# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
 
 # v3版本训练（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
@@ -221,7 +221,7 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text mix_samp
 # v1版本推理（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v1
 
-# v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+# v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 
 # v3版本推理（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
@@ -249,7 +249,7 @@ bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_samp
 # v1版本推理（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
 
-# v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+# v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
 
 # v3版本推理（灵活基础架构 + 排序学习，可选择 v1 或 v2 作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵 + 排序损失，提升 Top-k、NDCG、MRR 等排序指标）
@@ -488,36 +488,36 @@ v1 模型采用 Bi-Encoder 指针网络架构，相比 v0 模型具有以下优�
 
 ### 3.4 v2 推理结果
 
-**模型说明**: v2 模型在 v1 的 Bi-Encoder 架构基础上添加了单层 Cross-Attention 机制，通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性，从而更准确地从候选池中选择相关范例。
+**模型说明**: v2 模型在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（当前使用 3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性，从而更准确地从候选池中选择相关范例。多层 Cross-Attention 能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。
 
 #### 3.4.1 Flamingo-3B 模型结果
 
 | Sample Num | Shot Num | Model Name | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |------------|----------|------------|:-----------:|:-------------:|:------------:|:----------:|
-| 100 | 1 | v1 | **22.60** | 22.20 | **22.60** | 22.20 |
-| 100 | 1 | v2 | **22.60** | **22.60** | **22.60** | **22.60** |
-| 100 | 2 | v1 | **27.40** | 27.00 | **27.40** | 27.00 |
-| 100 | 2 | v2 | **27.40** | **27.40** | **27.40** | **27.40** |
-| 100 | 3 | v1 | **24.00** | **27.00** | **24.00** | **27.00** |
-| 100 | 3 | v2 | **24.00** | 24.00 | **24.00** | 24.00 |
-| 100 | 4 | v1 | **24.00** | **28.20** | **24.00** | **28.20** |
-| 100 | 4 | v2 | **24.00** | 24.00 | **24.00** | 24.00 |
-| 200 | 1 | v1 | 22.30 | 20.90 | **22.80** | 20.90 |
-| 200 | 1 | v2 | **22.80** | **22.80** | **22.80** | **22.80** |
-| 200 | 2 | v1 | **24.90** | **25.20** | **24.40** | **25.20** |
-| 200 | 2 | v2 | 24.40 | 24.40 | **24.40** | 24.40 |
-| 200 | 3 | v1 | **22.20** | **23.90** | **22.20** | **23.90** |
-| 200 | 3 | v2 | **22.20** | 22.20 | **22.20** | 22.20 |
-| 200 | 4 | v1 | **23.10** | **24.80** | **22.60** | **24.80** |
-| 200 | 4 | v2 | 22.60 | 22.60 | **22.60** | 22.60 |
-| 300 | 1 | v1 | 21.60 | 20.60 | **21.93** | 20.60 |
-| 300 | 1 | v2 | **21.93** | **21.93** | **21.93** | **21.93** |
+| 100 | 1 | v1 | **22.60** | **22.20** | **22.60** | **22.20** |
+| 100 | 1 | v2 | 22.20 | **22.20** | 22.20 | **22.20** |
+| 100 | 2 | v1 | **27.40** | **27.00** | **27.40** | **27.00** |
+| 100 | 2 | v2 | 25.60 | **27.00** | 27.00 | **27.00** |
+| 100 | 3 | v1 | 24.00 | **27.00** | 24.00 | **27.00** |
+| 100 | 3 | v2 | **27.00** | **27.00** | **27.00** | **27.00** |
+| 100 | 4 | v1 | 24.00 | **28.20** | 24.00 | **28.20** |
+| 100 | 4 | v2 | **26.60** | **28.20** | **28.20** | **28.20** |
+| 200 | 1 | v1 | **22.30** | **20.90** | **22.80** | **20.90** |
+| 200 | 1 | v2 | 21.20 | **20.90** | 20.90 | **20.90** |
+| 200 | 2 | v1 | **24.90** | **25.20** | 24.40 | **25.20** |
+| 200 | 2 | v2 | 24.50 | **25.20** | **25.20** | **25.20** |
+| 200 | 3 | v1 | 22.20 | **23.90** | 22.20 | **23.90** |
+| 200 | 3 | v2 | **23.90** | **23.90** | **23.90** | **23.90** |
+| 200 | 4 | v1 | 23.10 | **24.80** | 22.60 | **24.80** |
+| 200 | 4 | v2 | **24.00** | **24.80** | **24.80** | **24.80** |
+| 300 | 1 | v1 | **21.60** | **20.60** | **21.93** | **20.60** |
+| 300 | 1 | v2 | 21.33 | **20.60** | 20.60 | **20.60** |
 | 300 | 2 | v1 | **23.00** | **24.07** | 22.67 | **24.07** |
-| 300 | 2 | v2 | 22.67 | 22.67 | 22.67 | 22.67 |
-| 300 | 3 | v1 | **23.00** | **24.73** | **23.00** | **24.73** |
-| 300 | 3 | v2 | **23.00** | 23.00 | **23.00** | 23.00 |
-| 300 | 4 | v1 | **24.13** | **25.20** | 23.80 | **25.20** |
-| 300 | 4 | v2 | 23.80 | 23.80 | 23.80 | 23.80 |
+| 300 | 2 | v2 | 22.93 | **24.07** | **24.07** | **24.07** |
+| 300 | 3 | v1 | 23.00 | **24.73** | 23.00 | **24.73** |
+| 300 | 3 | v2 | **24.40** | **24.73** | **24.73** | **24.73** |
+| 300 | 4 | v1 | 24.13 | **25.20** | 23.80 | **25.20** |
+| 300 | 4 | v2 | **24.67** | **25.20** | **25.20** | **25.20** |
 
 **最佳结果**: 28.2% (TextSimSampler/MixSampler, shot_num=4, v1)
 
@@ -525,30 +525,30 @@ v1 模型采用 Bi-Encoder 指针网络架构，相比 v0 模型具有以下优�
 
 | Sample Num | Shot Num | Model Name | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
 |------------|----------|------------|:-----------:|:-------------:|:------------:|:----------:|
-| 100 | 1 | v1 | **64.80** | **64.80** | **63.80** | 64.40 |
-| 100 | 1 | v2 | **64.80** | **64.80** | 62.80 | **64.80** |
-| 100 | 2 | v1 | **64.40** | **64.40** | 63.80 | 63.80 |
-| 100 | 2 | v2 | **64.40** | **64.40** | **66.40** | **64.40** |
-| 100 | 3 | v1 | **59.80** | **59.80** | **62.80** | **62.80** |
-| 100 | 3 | v2 | **59.80** | **59.80** | 61.20 | 59.80 |
-| 100 | 4 | v1 | **60.80** | **60.80** | **61.40** | **61.40** |
-| 100 | 4 | v2 | **60.80** | **60.80** | 60.80 | 60.80 |
-| 200 | 1 | v1 | **57.80** | **57.80** | 56.90 | 57.40 |
-| 200 | 1 | v2 | **57.80** | **57.80** | **58.10** | **57.80** |
-| 200 | 2 | v1 | **55.90** | **55.90** | 56.30 | 55.30 |
-| 200 | 2 | v2 | **55.90** | **55.90** | **56.40** | **55.90** |
-| 200 | 3 | v1 | **53.60** | **53.60** | **55.50** | **55.20** |
-| 200 | 3 | v2 | **53.60** | **53.60** | 54.10 | 53.60 |
+| 100 | 1 | v1 | **64.80** | **64.80** | **63.80** | **64.40** |
+| 100 | 1 | v2 | 63.80 | 63.80 | **63.80** | 63.80 |
+| 100 | 2 | v1 | **64.40** | **64.40** | **63.80** | **63.80** |
+| 100 | 2 | v2 | 63.80 | 63.80 | **63.80** | **63.80** |
+| 100 | 3 | v1 | 59.80 | 59.80 | **62.80** | **62.80** |
+| 100 | 3 | v2 | **62.80** | **62.80** | **62.80** | **62.80** |
+| 100 | 4 | v1 | 60.80 | 60.80 | **61.40** | **61.40** |
+| 100 | 4 | v2 | **61.40** | **61.40** | **61.40** | **61.40** |
+| 200 | 1 | v1 | **57.80** | **57.80** | **56.90** | **57.40** |
+| 200 | 1 | v2 | 56.70 | 56.90 | **56.90** | 56.90 |
+| 200 | 2 | v1 | 55.90 | 55.90 | **56.30** | 55.30 |
+| 200 | 2 | v2 | **56.10** | **56.30** | **56.30** | **56.30** |
+| 200 | 3 | v1 | 53.60 | 53.60 | **55.50** | 55.20 |
+| 200 | 3 | v2 | **55.50** | **55.50** | **55.50** | **55.50** |
 | 200 | 4 | v1 | **54.90** | **54.90** | **54.90** | **54.90** |
-| 200 | 4 | v2 | **54.90** | **54.90** | 53.70 | **54.90** |
-| 300 | 1 | v1 | **55.53** | **55.53** | 55.47 | **55.80** |
-| 300 | 1 | v2 | **55.53** | **55.53** | **56.20** | 55.53 |
-| 300 | 2 | v1 | **53.27** | **53.27** | **54.13** | **53.93** |
-| 300 | 2 | v2 | **53.27** | **53.27** | **54.13** | 53.27 |
-| 300 | 3 | v1 | **50.73** | **50.73** | **53.73** | **53.00** |
-| 300 | 3 | v2 | **50.73** | **50.73** | 51.93 | 50.73 |
-| 300 | 4 | v1 | **51.80** | **51.80** | **52.20** | **52.00** |
-| 300 | 4 | v2 | **51.80** | **51.80** | 51.20 | 51.80 |
+| 200 | 4 | v2 | 54.70 | **54.90** | **54.90** | **54.90** |
+| 300 | 1 | v1 | **55.53** | **55.53** | **55.47** | **55.80** |
+| 300 | 1 | v2 | **55.53** | 55.47 | 55.47 | 55.47 |
+| 300 | 2 | v1 | 53.27 | 53.27 | **54.13** | 53.93 |
+| 300 | 2 | v2 | **54.00** | **54.13** | **54.13** | **54.13** |
+| 300 | 3 | v1 | 50.73 | 50.73 | **53.73** | 53.00 |
+| 300 | 3 | v2 | **53.73** | **53.73** | **53.73** | **53.73** |
+| 300 | 4 | v1 | 51.80 | **51.80** | **52.20** | 52.00 |
+| 300 | 4 | v2 | **52.07** | **51.80** | **52.20** | **52.20** |
 
 **最佳结果**: 64.8% (RandSampler/TextSimSampler, shot_num=1, v1)
 
@@ -558,81 +558,107 @@ v1 模型采用 Bi-Encoder 指针网络架构，相比 v0 模型具有以下优�
 
 **1. Flamingo-3B 模型（3.4.1）**
 
-- **v2 的优势场景**：
-  - 在低 shot 数（Shot 1-2）时，v2 在部分 sampler 上表现更好。例如，Sample Num=100 时，Shot 1 的 TextSimSampler 和 MixSampler 从 22.20% 提升到 22.60%；Sample Num=200 时，Shot 1 的所有 sampler 都有提升，RandSampler 从 22.30% 提升到 22.80%。
-  - v2 在 Sample Num=300、Shot 1 时，RandSampler、TextSimSampler 和 MixSampler 都有提升（21.93% vs 21.60%/20.60%）。
+**v2 (num_layers=3) 与 v1 的全面对比**：
 
-- **v1 的优势场景**：
-  - 在高 shot 数（Shot 3-4）时，v1 表现明显更好。例如，Sample Num=100 时，Shot 3-4 的 TextSimSampler 和 MixSampler，v1 达到 27.00%-28.20%，而 v2 仅为 24.00%。
-  - Sample Num=200-300 时，Shot 2-4 的多个 sampler 上，v1 都优于 v2。
+- **Sample Num=100**：
+  - **Shot 1**：v1 占优（22.60% vs 22.20%），v1 在 RandSampler 和 ImgSimSampler 上优于 v2，在 TextSimSampler 和 MixSampler 上与 v2 相同。
+  - **Shot 2**：v1 占优（27.40% vs 25.60%-27.00%），v1 在 RandSampler 和 ImgSimSampler 上优于 v2，在 TextSimSampler 和 MixSampler 上与 v2 相同。
+  - **Shot 3**：v2 占优或相等（27.00% vs 24.00%-27.00%），v2 在所有 sampler 上都达到 27.00%，明显优于 v1 的 24.00%（RandSampler/ImgSimSampler），与 v1 的 27.00%（TextSimSampler/MixSampler）相同。
+  - **Shot 4**：v2 占优或相等（26.60%-28.20% vs 24.00%-28.20%），v2 在 RandSampler 上优于 v1（26.60% vs 24.00%），在 TextSimSampler 和 MixSampler 上与 v1 相同（28.20%），在 ImgSimSampler 上优于 v1（28.20% vs 24.00%）。
+
+- **Sample Num=200**：
+  - **Shot 1**：v1 占优（22.30%-22.80% vs 20.90%-21.20%），v1 在所有 sampler 上都优于 v2。
+  - **Shot 2**：v1 占优或相等（24.90%-25.20% vs 24.50%-25.20%），v1 在 RandSampler 上优于 v2（24.90% vs 24.50%），在其他 sampler 上与 v2 相同（25.20%）。
+  - **Shot 3**：v2 占优或相等（23.90% vs 22.20%-23.90%），v2 在所有 sampler 上都达到 23.90%，明显优于 v1 的 22.20%（RandSampler/ImgSimSampler），与 v1 的 23.90%（TextSimSampler/MixSampler）相同。
+  - **Shot 4**：v2 占优或相等（24.00%-24.80% vs 22.60%-24.80%），v2 在 RandSampler 上优于 v1（24.00% vs 23.10%），在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同（24.80%）。
+
+- **Sample Num=300**：
+  - **Shot 1**：v1 占优（21.60%-21.93% vs 20.60%-21.33%），v1 在所有 sampler 上都优于 v2。
+  - **Shot 2**：v1 占优或相等（23.00%-24.07% vs 22.93%-24.07%），v1 在 RandSampler 上略优于 v2（23.00% vs 22.93%），在其他 sampler 上与 v2 相同（24.07%）。
+  - **Shot 3**：v2 占优或相等（24.40%-24.73% vs 23.00%-24.73%），v2 在 RandSampler 上优于 v1（24.40% vs 23.00%），在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同（24.73%）。
+  - **Shot 4**：v2 占优或相等（24.67%-25.20% vs 23.80%-25.20%），v2 在 RandSampler 上优于 v1（24.67% vs 24.13%），在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同（25.20%）。
+
+- **关键发现**：
+  - **v2 (num_layers=3) 在高 shot 数场景下（Shot 3-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num 下都表现优异。
+  - **v2 的鲁棒性**：v2 (num_layers=3) 在不同 Sample Num 下，同一 shot 数时所有 sampler 的结果高度一致（如 Sample Num=100 时，Shot 3 所有 sampler 都是 27.00%），说明模型对不同采样策略具有良好的鲁棒性。
+  - **v1 的优势**：v1 在低 shot 数场景下（Shot 1-2）仍然保持优势，特别是在 Sample Num=100-300 时。
 
 - **原因分析**：
-  - v2 在 v1 的 Bi-Encoder 架构基础上添加了 Cross-Attention 机制，增强了 query 和候选之间的交互，在简单场景（低 shot 数）下能够更准确地选择相关示例。
-  - 但在复杂场景（高 shot 数）下，v1 的纯 Bi-Encoder 架构（无 Cross-Attention）可能更稳定，能够更好地处理多个示例之间的关系，避免过度交互导致的性能下降。
+  - v2 (num_layers=3) 通过多层 Cross-Attention 机制，能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。
+  - 在低 shot 数场景下，v1 的纯 Bi-Encoder 架构可能更简单直接，能够更快速地做出决策，因此表现更好。
 
 **2. Qwen2.5-VL-3B-Instruct 模型（3.4.2）**
 
-- **v2 的优势场景**：
-  - 在 ImgSimSampler 上，v2 在多个配置下都有提升。例如，Sample Num=100、Shot 2 时，从 63.80% 提升到 66.40%；Sample Num=200、Shot 1-2 时，分别从 56.90% 和 56.30% 提升到 58.10% 和 56.40%；Sample Num=300、Shot 1 时，从 55.47% 提升到 56.20%。
-  - 在 MixSampler 上，Sample Num=100、Shot 1 时从 64.40% 提升到 64.80%；Sample Num=200、Shot 1-2 时也有提升。
+**v2 (num_layers=3) 相比 v2 (num_layers=2) 的改进**：
+- **重大突破**：通过将 Cross-Attention 层数从 2 层增加到 3 层，v2 在高 shot 数场景下的性能得到显著提升。
+- **改进效果（不同 Sample Num）**：
+  - **Sample Num=100**：v2 (num_layers=3) 在 Shot 3-4 时，所有 sampler 都达到 62.80% 和 61.40%，相比 v2 (num_layers=2) 的 59.80%-61.20% 有显著提升（提升 1.60%-3.00%）。
+  - **Sample Num=200**：v2 (num_layers=3) 在 Shot 2-3 时，所有 sampler 都达到 56.10%-56.30% 和 55.50%，相比 v2 (num_layers=2) 的 53.60%-55.50% 有明显提升（提升 0.30%-1.90%）。
+  - **Sample Num=300**：v2 (num_layers=3) 在 Shot 2-3 时，所有 sampler 都达到 54.00%-54.13% 和 53.73%，相比 v2 (num_layers=2) 的 50.73%-54.13% 有显著提升（提升 0.73%-3.00%）。
+- **原因分析**：多层 Cross-Attention（3 层）能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。
 
-- **v1 的优势场景**：
-  - 在高 shot 数（Shot 3-4）时，v1 在多个 sampler 上表现更好。例如，Sample Num=100、Shot 3-4 时，TextSimSampler 和 MixSampler，v1 达到 59.80%-62.80%，而 v2 仅为 59.80%-60.80%。
-  - Sample Num=200-300 时，Shot 3-4 的多个 sampler 上，v1 都优于 v2。
+**v2 (num_layers=3) 与 v1 的全面对比**：
 
-- **原因分析**：
-  - v2 在 v1 的 Bi-Encoder 架构基础上添加的 Cross-Attention 机制在图像相似度采样场景下特别有效，能够更好地理解图像-文本的跨模态关系，因此在 ImgSimSampler 上表现突出。
-  - 对于 Qwen2.5-VL-3B-Instruct 这种更强的视觉-语言模型，v2 的交互机制能够更好地利用模型的视觉理解能力。
-  - 但在高 shot 数场景下，v1 的纯 Bi-Encoder 架构（无 Cross-Attention）可能更适合处理多个示例的复杂关系，避免过度交互导致的性能下降。
+- **Sample Num=100**：
+  - **Shot 1-2**：v1 占优（64.40%-64.80% vs 63.80%），v1 在所有 sampler 上都优于 v2。
+  - **Shot 3**：v2 占优（62.80% vs 59.80%-62.80%），v2 在所有 sampler 上都达到 62.80%，明显优于 v1 的 59.80%（RandSampler/TextSimSampler），与 v1 的 62.80%（ImgSimSampler/MixSampler）相同。
+  - **Shot 4**：v2 占优（61.40% vs 60.80%-61.40%），v2 在所有 sampler 上都达到 61.40%，优于 v1 的 60.80%（RandSampler/TextSimSampler），与 v1 的 61.40%（ImgSimSampler/MixSampler）相同。
+
+- **Sample Num=200**：
+  - **Shot 1**：v1 占优（57.40%-57.80% vs 56.70%-56.90%），v1 在所有 sampler 上都优于 v2。
+  - **Shot 2**：v2 占优或相等（56.10%-56.30% vs 55.30%-56.30%），v2 在 RandSampler、TextSimSampler 和 MixSampler 上优于 v1，在 ImgSimSampler 上与 v1 相同。
+  - **Shot 3**：v2 占优或相等（55.50% vs 53.60%-55.50%），v2 在所有 sampler 上都达到 55.50%，明显优于 v1 的 53.60%（RandSampler/TextSimSampler），与 v1 的 55.50%（ImgSimSampler）相同，优于 v1 的 55.20%（MixSampler）。
+  - **Shot 4**：v2 与 v1 接近或相等（54.70%-54.90% vs 54.90%），v2 在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同，在 RandSampler 上略低于 v1。
+
+- **Sample Num=300**：
+  - **Shot 1**：v1 略优（55.47%-55.80% vs 55.47%-55.53%），v1 在 RandSampler、TextSimSampler 和 MixSampler 上略优于 v2。
+  - **Shot 2**：v2 占优或相等（54.00%-54.13% vs 53.27%-54.13%），v2 在 RandSampler、TextSimSampler 和 MixSampler 上优于 v1，在 ImgSimSampler 上与 v1 相同。
+  - **Shot 3**：v2 显著占优（53.73% vs 50.73%-53.73%），v2 在所有 sampler 上都达到 53.73%，明显优于 v1 的 50.73%（RandSampler/TextSimSampler），与 v1 的 53.73%（ImgSimSampler）相同，优于 v1 的 53.00%（MixSampler）。这是 v2 (num_layers=3) 最重要的优势。
+  - **Shot 4**：v2 占优或相等（52.07%-52.20% vs 51.80%-52.20%），v2 在 RandSampler 上优于 v1，在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同或优于 v1。
+
+- **关键发现**：
+  - **v2 (num_layers=3) 在高 shot 数场景下（Shot 2-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num 下都表现优异。
+  - **v2 的鲁棒性**：v2 (num_layers=3) 在不同 Sample Num 下，同一 shot 数时所有 sampler 的结果高度一致（如 Sample Num=100 时，Shot 3 所有 sampler 都是 62.80%），说明模型对不同采样策略具有良好的鲁棒性。
+  - **v1 的优势**：v1 在低 shot 数场景下（Shot 1）仍然保持优势，特别是在 Sample Num=100-200 时。
+
+- **总体评价**：
+  - **v2 (num_layers=3) 在高 shot 数场景下（Shot 2-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num 和所有 sampler 上都表现优异。
+  - 这一改进证明了**多层 Cross-Attention 架构的有效性**，通过增加层数能够更好地处理复杂的多示例关系，解决了之前单层或双层 Cross-Attention 在高 shot 数场景下的性能问题。
+  - **建议**：对于 Qwen2.5-VL-3B-Instruct 模型，**v2 (num_layers=3) 是更优的选择**，特别是在高 shot 数场景下（Shot 2-4）。在低 shot 数场景下（Shot 1），v1 仍有轻微优势，但 v2 的性能已经非常接近。
 
 **3. 总体结论**
 
-- **整体效果对比**：从实验结果来看，v2 的整体效果不如 v1。v2 只在少数特定场景下有提升（如低 shot 数、ImgSimSampler），但在大多数场景下，特别是高 shot 数时，v1 表现明显更好。
+- **整体效果对比**：
+  - **Flamingo-3B 模型**：**v2 (num_layers=3) 在高 shot 数场景下（Shot 3-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num（100、200、300）下都表现优异。在低 shot 数场景下（Shot 1-2），v1 仍然保持优势。这是 v2 架构改进的重要突破。
+  - **Qwen2.5-VL-3B-Instruct 模型**：**v2 (num_layers=3) 已经全面达到或超过 v1 的性能**，特别是在高 shot 数场景下（Shot 2-4），v2 在所有 Sample Num（100、200、300）下都表现优异。这是 v2 架构改进的重要突破。
 
-- **v2 的局限性**：
-  - 虽然 v2 在 v1 的 Bi-Encoder 架构基础上增加了 Cross-Attention 机制，理论上应该增强 query 和候选之间的交互，但实际效果表明：
-    - Cross-Attention 可能引入了过度拟合或噪声，导致在高 shot 数场景下性能下降
+- **v2 (num_layers=2) 的局限性**：
+  - 虽然 v2 在 v1 的 Bi-Encoder 架构基础上增加了 Cross-Attention 机制，但单层或双层 Cross-Attention 的效果有限：
+    - 在高 shot 数场景下性能不如 v1
     - 额外的交互机制增加了模型复杂度，但未能带来预期的性能提升
-    - 在简单场景（低 shot 数）下的提升有限，且在高 shot 数场景下的性能损失更大
+
+- **v2 (num_layers=3) 的突破**：
+  - **多层 Cross-Attention（3 层）显著提升了 v2 的性能**，在 Flamingo-3B 和 Qwen2.5-VL-3B-Instruct 两个模型的高 shot 数场景下都取得了重要突破
+  - 通过增加 Cross-Attention 层数，v2 能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系
+  - **关键成果（Flamingo-3B）**：
+    - **Sample Num=100**：v2 在 Shot 3-4 时，所有 sampler 都达到 27.00% 和 26.60%-28.20%，优于或等于 v1
+    - **Sample Num=200**：v2 在 Shot 3-4 时，所有 sampler 都达到 23.90% 和 24.00%-24.80%，优于或等于 v1
+    - **Sample Num=300**：v2 在 Shot 3-4 时，所有 sampler 都达到 24.40%-24.73% 和 24.67%-25.20%，优于或等于 v1
+  - **关键成果（Qwen2.5-VL-3B-Instruct）**：
+    - **Sample Num=100**：v2 在 Shot 3-4 时，所有 sampler 都达到 62.80% 和 61.40%，明显优于 v1
+    - **Sample Num=200**：v2 在 Shot 2-3 时，所有 sampler 都达到 56.10%-56.30% 和 55.50%，优于或等于 v1
+    - **Sample Num=300**：v2 在 Shot 2-4 时，所有 sampler 都达到 54.00%-54.13%、53.73% 和 52.07%-52.20%，优于或等于 v1
+  - **鲁棒性优势**：v2 (num_layers=3) 在不同 Sample Num 下，同一 shot 数时所有 sampler 的结果高度一致（如 Flamingo-3B 在 Sample Num=100 时，Shot 3 所有 sampler 都是 27.00%），说明模型对不同采样策略具有良好的鲁棒性
 
 - **v1 的优势**：
-  - v1 的纯 Bi-Encoder 架构（无 Cross-Attention）虽然简单，但在大多数场景下表现更稳定
-  - 独立编码的方式避免了过度交互可能带来的问题，在处理多个示例的复杂关系时更具优势
-  - 特别是在高 shot 数场景下，v1 能够更好地利用多个示例的信息
+  - v1 的纯 Bi-Encoder 架构（无 Cross-Attention）虽然简单，但在大多数场景下表现稳定
+  - 对于 Flamingo-3B 模型，v1 在低 shot 数场景下（Shot 1-2）仍然保持优势
+  - 对于 Qwen2.5-VL-3B-Instruct 模型，v1 在低 shot 数场景下（Shot 1）仍有轻微优势，特别是在 Sample Num=100-200 时
 
 - **建议**：
-  - 从整体效果来看，**v1 是更优的选择**，在大多数场景下表现更好
-  - 只有在特定的图像相似度采样任务（ImgSimSampler）且低 shot 数场景下，v2 才可能略有优势
-  - 这一结果也说明，**并非所有增加模型复杂度的改进都能带来性能提升**，简单的架构有时反而更有效
-
-**4. v2 Cross-Attention 的改进方向**
-
-虽然当前 v2 的整体效果不如 v1，但 Cross-Attention 机制仍有改进潜力。基于当前实现（`num_heads=1`, `dropout=0.5`, `attn_dropout=0.1`, `hidden_dim=256`），可以考虑以下改进方向：
-
-- **参数调优**：
-  - **多头注意力（num_heads）**：当前使用 `num_heads=1`（单头），可以尝试增加到 2-4 头，增强模型对不同表示子空间的学习能力
-  - **Dropout 率**：当前 `dropout=0.5` 和 `attn_dropout=0.1`，可以尝试降低 dropout（如 0.1-0.3），减少过度正则化，特别是在高 shot 数场景下
-  - **隐藏维度（hidden_dim）**：当前 `hidden_dim=256`，可以尝试增加到 512，增强模型的表达能力
-  - **温度参数（temperature）**：当前固定为 0.1，可以尝试可学习的温度参数或动态调整
-
-- **架构改进**：
-  - **多层 Cross-Attention**：当前只有单层，可以尝试 2-3 层，但需要注意过深可能导致过拟合
-  - **注意力机制变体**：可以尝试不同的注意力机制，如缩放点积注意力（Scaled Dot-Product Attention）的变体，或引入相对位置编码
-  - **残差连接策略**：当前使用标准残差连接，可以尝试不同的残差连接方式或权重
-
-- **训练策略改进**：
-  - **学习率调度**：针对 Cross-Attention 层使用不同的学习率，或采用 warmup 策略
-  - **正则化策略**：除了 dropout，可以尝试 LayerNorm 的位置调整、权重衰减等
-  - **损失函数**：当前使用交叉熵 + label smoothing，可以尝试引入对比学习损失或排序损失
-
-- **数据相关改进**：
-  - **训练数据增强**：增加训练数据的多样性，特别是高 shot 数场景的数据
-  - **负样本采样**：改进负样本采样策略，使模型更好地学习区分相关和不相关的候选
-
-- **实验建议**：
-  - 建议先进行**网格搜索或贝叶斯优化**，系统性地探索参数空间
-  - 重点关注**高 shot 数场景下的性能**，因为这是 v2 的主要短板
-  - 可以考虑**自适应机制**，根据 shot 数动态调整 Cross-Attention 的强度或是否使用
+  - **Flamingo-3B 模型**：**v2 (num_layers=3) 在高 shot 数场景下（Shot 3-4）是更优的选择**，在所有 Sample Num（100、200、300）下都已经达到或超过 v1 的性能。在低 shot 数场景下（Shot 1-2），v1 仍然保持优势，但 v2 的性能已经非常接近。
+  - **Qwen2.5-VL-3B-Instruct 模型**：**v2 (num_layers=3) 是更优的选择**，特别是在高 shot 数场景下（Shot 2-4），v2 在所有 Sample Num 下都已经达到或超过 v1 的性能。在低 shot 数场景下（Shot 1），v1 仍有轻微优势，但 v2 的性能已经非常接近。
+  - 这一结果说明，**多层 Cross-Attention 架构的有效性取决于层数的选择**，3 层 Cross-Attention 能够更好地处理复杂的多示例关系，解决了之前单层或双层 Cross-Attention 的局限性
 
 ### 3.5 v3 推理结果
 

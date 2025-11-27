@@ -44,7 +44,8 @@ class PointerSelectorV2(nn.Module):
         dropout: float = 0.1,
         hidden_dim: int = 256,
         num_heads: int = 1,
-        attn_dropout: float = 0.1
+        attn_dropout: float = 0.1,
+        num_layers: int = 1
     ):
         """
         初始化 V2 模型
@@ -58,6 +59,7 @@ class PointerSelectorV2(nn.Module):
             hidden_dim: 输出维度 (默认 256, 符合 yiyun.md: CLIP 768 → proj → 256)
             num_heads: Cross-Attention 的头数 (默认 1, 单层保持效率)
             attn_dropout: Attention 层的 dropout (默认 0.1)
+            num_layers: Cross-Attention 的层数 (默认 1, 单层)
         """
         super().__init__()
         
@@ -68,6 +70,7 @@ class PointerSelectorV2(nn.Module):
         self.label_smoothing = label_smoothing
         self.num_heads = num_heads
         self.attn_dropout = attn_dropout
+        self.num_layers = num_layers
         
         # 投影层（如果 d_model != hidden_dim，需要降维/升维）
         # 符合 yiyun.md: d_model=256, hidden_dim=256 时为恒等映射
@@ -77,17 +80,23 @@ class PointerSelectorV2(nn.Module):
             # d_model == hidden_dim 时使用恒等映射（节省参数）
             self.input_proj = nn.Identity()
         
-        # 【V2新增】Cross-Attention 层：增强query与candidates的细粒度交互
-        # 使用多头注意力机制，让query从candidates中获取更丰富的上下文信息
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=attn_dropout,
-            batch_first=True  # 输入格式 [B, L, D]
-        )
+        # 【V2新增】多层 Cross-Attention：增强query与candidates的细粒度交互
+        # 使用 ModuleList 存储多层 Cross-Attention 和对应的 LayerNorm
+        self.cross_attn_layers = nn.ModuleList([
+            nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=attn_dropout,
+                batch_first=True  # 输入格式 [B, L, D]
+            )
+            for _ in range(num_layers)
+        ])
         
-        # Layer Normalization（Cross-Attention后的归一化）
-        self.attn_norm = nn.LayerNorm(hidden_dim)
+        # Layer Normalization（每层 Cross-Attention 后的归一化）
+        self.attn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
         
         # 投影层：hidden_dim -> hidden_dim
         self.query_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -113,9 +122,10 @@ class PointerSelectorV2(nn.Module):
         print(f"  - dropout: {dropout}")
         print(f"  - num_heads: {num_heads}")
         print(f"  - attn_dropout: {attn_dropout}")
+        print(f"  - num_layers: {num_layers} (多层 Cross-Attention)")
         print(f"  - temperature: 0.1 (增强区分度，加速学习)")
         print(f"  - residual_connection: ✓ (稳定训练)")
-        print(f"  - 架构: CLIP {d_model} → proj → {hidden_dim} + Cross-Attention")
+        print(f"  - 架构: CLIP {d_model} → proj → {hidden_dim} + {num_layers}层 Cross-Attention")
     
     def _init_weights(self):
         """初始化模型权重"""
@@ -166,18 +176,22 @@ class PointerSelectorV2(nn.Module):
         cand_reduced = self.input_proj(cand_emb.reshape(-1, input_dim))  # [B*K, hidden_dim]
         cand_reduced = cand_reduced.reshape(batch_size, self.K, self.hidden_dim)  # [B, K, hidden_dim]
         
-        # 【V2新增】步骤2：Cross-Attention 增强
-        # query作为Q，candidates作为K和V，增强query的表示
+        # 【V2新增】步骤2：多层 Cross-Attention 增强
+        # query作为Q，candidates作为K和V，通过多层增强query的表示
         query_for_attn = query_reduced.unsqueeze(1)  # [B, 1, 256]
-        attn_output, _ = self.cross_attn(
-            query=query_for_attn,      # [B, 1, 256]
-            key=cand_reduced,          # [B, K, 256]
-            value=cand_reduced         # [B, K, 256]
-        )
-        # 【重要】添加残差连接，稳定训练
-        # 标准 Transformer 做法：残差连接 + LayerNorm
-        query_enhanced = self.attn_norm(attn_output + query_for_attn)  # [B, 1, 256]
-        query_enhanced = query_enhanced.squeeze(1)  # [B, 256]
+        
+        # 循环应用多层 Cross-Attention
+        for layer_idx in range(self.num_layers):
+            attn_output, _ = self.cross_attn_layers[layer_idx](
+                query=query_for_attn,      # [B, 1, 256]
+                key=cand_reduced,          # [B, K, 256]
+                value=cand_reduced         # [B, K, 256]
+            )
+            # 【重要】添加残差连接，稳定训练
+            # 标准 Transformer 做法：残差连接 + LayerNorm
+            query_for_attn = self.attn_norms[layer_idx](attn_output + query_for_attn)  # [B, 1, 256]
+        
+        query_enhanced = query_for_attn.squeeze(1)  # [B, 256]
         
         # 步骤3：投影层（128 -> 128）
         query_proj = self.query_proj(query_enhanced)  # [B, 128]
@@ -316,6 +330,7 @@ class PointerSelectorV2Config:
     注意：
     - d_model: 输入维度（CLIP 768）
     - hidden_dim: 输出维度（yiyun.md 要求 256）
+    - num_layers: Cross-Attention 层数（默认 1，单层）
     """
     
     def __init__(
@@ -327,7 +342,8 @@ class PointerSelectorV2Config:
         dropout: float = 0.1,
         hidden_dim: int = 256,
         num_heads: int = 1,
-        attn_dropout: float = 0.1
+        attn_dropout: float = 0.1,
+        num_layers: int = 1
     ):
         self.d_model = d_model
         self.K = K
@@ -337,6 +353,7 @@ class PointerSelectorV2Config:
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.attn_dropout = attn_dropout
+        self.num_layers = num_layers
     
     def to_dict(self):
         return {
@@ -347,7 +364,8 @@ class PointerSelectorV2Config:
             'dropout': self.dropout,
             'hidden_dim': self.hidden_dim,
             'num_heads': self.num_heads,
-            'attn_dropout': self.attn_dropout
+            'attn_dropout': self.attn_dropout,
+            'num_layers': self.num_layers
         }
 
 
@@ -372,7 +390,8 @@ def build_model_v2(config: Optional[PointerSelectorV2Config] = None) -> PointerS
         dropout=config.dropout,
         hidden_dim=config.hidden_dim,
         num_heads=config.num_heads,
-        attn_dropout=config.attn_dropout
+        attn_dropout=config.attn_dropout,
+        num_layers=config.num_layers
     )
     
     return model

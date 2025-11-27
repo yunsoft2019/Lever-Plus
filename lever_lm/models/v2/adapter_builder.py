@@ -48,7 +48,8 @@ def build_model_v2_with_adapter(
             dropout=config_dict.get('dropout', 0.1),
             hidden_dim=config_dict.get('hidden_dim', 256),
             num_heads=config_dict.get('num_heads', 1),
-            attn_dropout=config_dict.get('attn_dropout', 0.1)
+            attn_dropout=config_dict.get('attn_dropout', 0.1),
+            num_layers=config_dict.get('num_layers', 1)
         )
     
     # 构建 v2 模型
