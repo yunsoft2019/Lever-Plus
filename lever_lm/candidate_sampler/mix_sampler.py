@@ -23,6 +23,7 @@ class MixSimSampler(BaseSampler):
         device,
         candidate_set_encode_bs,
         sampler_ratio: dict,
+        seed: int = 42,
     ):
         self.sampler_ratio = sampler_ratio
         self.sampler_candidate_num = {}
@@ -47,6 +48,7 @@ class MixSimSampler(BaseSampler):
             cache_dir=cache_dir,
             overwrite=overwrite,
             other_info=other_info,
+            seed=seed,
         )
         self.rand_sampler = RandSampler(
             candidate_num=self.sampler_candidate_num['RandSampler'],
@@ -57,6 +59,7 @@ class MixSimSampler(BaseSampler):
             cache_dir=cache_dir,
             overwrite=overwrite,
             anchor_idx_list=self.anchor_idx_list,
+            seed=seed,
         )
         self.text_sim_sampler = TextSimSampler(
             candidate_num=self.sampler_candidate_num['TextSimSampler'],
@@ -72,6 +75,7 @@ class MixSimSampler(BaseSampler):
             device=device,
             candidate_set_encode_bs=candidate_set_encode_bs,
             anchor_idx_list=self.anchor_idx_list,
+            seed=seed,
         )
         self.img_sim_sampler = ImgSimSampler(
             candidate_num=self.sampler_candidate_num['ImgSimSampler'],
@@ -87,6 +91,7 @@ class MixSimSampler(BaseSampler):
             device=device,
             candidate_set_encode_bs=candidate_set_encode_bs,
             anchor_idx_list=self.anchor_idx_list,
+            seed=seed,
         )
 
     @torch.inference_mode()

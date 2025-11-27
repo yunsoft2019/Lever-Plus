@@ -17,7 +17,8 @@ class BaseSampler:
         overwrite,
         dataset_name,
         other_info='',
-        anchor_idx_list=None
+        anchor_idx_list=None,
+        seed: int = 42,
     ) -> None:
         self.candidate_num = candidate_num
         self.sampler_name = sampler_name
@@ -36,6 +37,7 @@ class BaseSampler:
         )
         self.cache_file = os.path.join(self.cache_dir, cache_fn)
         self.index_ds_len = index_ds_len
+        self.seed = seed
         if anchor_idx_list is None:
             self.anchor_idx_list = self.sample_anchor_set()
         else:
@@ -85,6 +87,8 @@ class BaseSampler:
             logger.info(
                 f'the anchor set cache {self.anchor_set_cache_fn} not exists or set overwrite mode. (overwrite: {self.overwrite})'
             )
+            # 设置随机种子以确保可复现性
+            random.seed(self.seed)
             anchor_idx_list = random.sample(
                 range(0, self.index_ds_len), self.anchor_sample_num
             )

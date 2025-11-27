@@ -429,15 +429,39 @@ def init_lever_lm(cfg, lever_lm_path):
         logger.info(f"使用 index_ds_size: {saved_index_ds_size} 来初始化模型")
     
     # 如果配置中有 device，在实例化模型时传递 device 参数，确保 CLIP 模型加载到正确的 GPU
+    # 注意：只有 v1+ 版本的模型（build_model_v1_with_adapter）支持 device 参数
+    # v0 版本的 GPT2LeverLM 不支持 device 参数
     instantiate_kwargs = {}
     if hasattr(cfg, 'device') and cfg.device:
-        instantiate_kwargs['device'] = cfg.device
-        logger.info(f"将在设备 {cfg.device} 上初始化模型（包括 CLIP 模型）")
+        # 检查是否是 v1+ 版本的模型
+        lever_lm_target = getattr(cfg.train.lever_lm, '_target_', '')
+        if 'build_model_v1_with_adapter' in lever_lm_target or 'v1' in lever_lm_target or 'v2' in lever_lm_target or 'v3' in lever_lm_target or 'v4' in lever_lm_target:
+            instantiate_kwargs['device'] = cfg.device
+            logger.info(f"将在设备 {cfg.device} 上初始化模型（包括 CLIP 模型）")
+        else:
+            logger.info(f"v0 模型不支持 device 参数，将在模型加载后移动到设备 {cfg.device}")
     
     lever_lm = hydra.utils.instantiate(cfg.train.lever_lm, **instantiate_kwargs)
     state_dict = checkpoint["state_dict"]
     state_dict = {k.replace("lever_lm.", ""): v for k, v in state_dict.items()}
-    lever_lm.load_state_dict(state_dict)
+    
+    # 检查是否有缺失的键（用于兼容旧检查点）
+    model_state_dict = lever_lm.state_dict()
+    missing_keys = set(model_state_dict.keys()) - set(state_dict.keys())
+    unexpected_keys = set(state_dict.keys()) - set(model_state_dict.keys())
+    
+    # 如果缺少 query_update_weight（新添加的参数），使用默认值初始化
+    if "pointer_selector.query_update_weight" in missing_keys:
+        logger.warning("检查点缺少 'query_update_weight' 参数，将使用默认值 0.6 初始化")
+        # 这个参数已经在模型初始化时设置了默认值，所以不需要额外处理
+    
+    # 使用 strict=False 允许缺失的键（新添加的参数会使用默认值）
+    lever_lm.load_state_dict(state_dict, strict=False)
+    
+    if missing_keys:
+        logger.info(f"缺失的键（将使用默认值）: {missing_keys}")
+    if unexpected_keys:
+        logger.warning(f"意外的键（将被忽略）: {unexpected_keys}")
     
     # 如果配置中有 device，将模型移动到该设备（确保所有子模块包括 CLIP 模型都在正确的设备上）
     if hasattr(cfg, 'device') and cfg.device:

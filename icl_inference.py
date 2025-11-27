@@ -6,6 +6,7 @@ import sys
 import uuid
 
 import hydra
+import numpy as np
 import torch
 from dotenv import load_dotenv
 from loguru import logger
@@ -453,11 +454,27 @@ def evaluate_retriever(
         record(result_json_path, {info: retriever_res})
 
 
+def set_seed(seed: int):
+    """设置全局随机种子以确保结果可复现"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # 设置PyTorch的确定性模式（可能会降低性能，但确保可复现性）
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    logger.info(f"随机种子已设置为: {seed}")
+
+
 @hydra.main(version_base=None, config_path="./configs", config_name="inference.yaml")
 def main(cfg: DictConfig):
     # 设置日志级别为 INFO，过滤掉 DEBUG 日志
     logger.remove()
     logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name}:{function}:{line} - {message}")
+    
+    # 设置全局随机种子（从配置中读取，默认为42）
+    seed = cfg.get('seed', 42)
+    set_seed(seed)
     
     logger.info(f"{cfg=}")
     

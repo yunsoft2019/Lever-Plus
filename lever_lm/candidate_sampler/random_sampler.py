@@ -14,6 +14,7 @@ class RandSampler(BaseSampler):
         cache_dir,
         overwrite,
         anchor_idx_list=None,
+        seed: int = 42,
     ):
         super().__init__(
             candidate_num=candidate_num,
@@ -25,8 +26,13 @@ class RandSampler(BaseSampler):
             overwrite=overwrite,
             anchor_idx_list=anchor_idx_list,
         )
+        self.seed = seed
+        # 设置随机种子以确保可复现性
+        random.seed(self.seed)
 
     def sample(self, anchor_set, train_ds):
+        # 确保使用固定的随机种子
+        random.seed(self.seed)
         candidate_set_idx = {}
         for s_idx in anchor_set:
             random_candidate_set = random.sample(

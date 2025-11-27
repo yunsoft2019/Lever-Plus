@@ -24,6 +24,7 @@ class ImgSimSampler(BaseSampler):
         device,
         candidate_set_encode_bs,
         anchor_idx_list=None,
+        seed: int = 42,
     ):
         super().__init__(
             candidate_num=candidate_num,
@@ -35,6 +36,7 @@ class ImgSimSampler(BaseSampler):
             overwrite=overwrite,
             other_info=feature_cache_filename.replace("openai/", ""),
             anchor_idx_list=anchor_idx_list,
+            seed=seed,
         )
         self.clip_model_name = clip_model_name
         self.feature_cache_filename = feature_cache_filename.replace("openai/", "")

@@ -6,6 +6,7 @@ lever_lm=${4:-query_img_icd_img_text}
 sampler=${5:-rand_sampler}
 beam_model=${6:-flamingo_3B}
 version=${7:-v0}
+test_data_num=${8:--1}  # 默认 -1 表示使用全部数据，可以设置为 200 等数字来限制推理数量
 
 # 固定批量大小为 1，避免批处理时的图像数量不匹配问题
 inference_bs=1
@@ -171,6 +172,7 @@ run_inference() {
     echo "  Train Config: ${train_config} (version: ${version})"
     echo "  Sample Num: ${sample_num}"
     echo "  Version: ${version}"
+    echo "  Test Data Num: ${test_data_num} (${test_data_num} == -1 表示使用全部数据)"
     echo "=========================================="
     
     if [ "${task}" == "vqa" ]; then
@@ -183,6 +185,7 @@ run_inference() {
                                 task=${task} \
                                 device=${device_arg} \
                                 inference_bs=${inference_bs} \
+                                test_data_num=${test_data_num} \
                                 test_lever_lm=true \
                                 infer_model=${infer_model} \
                                 infer_model.load_from_local=false
@@ -197,6 +200,7 @@ run_inference() {
                                 task=${task} \
                                 device=${device_arg} \
                                 inference_bs=${inference_bs} \
+                                test_data_num=${test_data_num} \
                                 test_lever_lm=true \
                                 train.lever_lm.norm=false \
                                 train.lever_lm.freeze_prefix_list="[img_model,sen_model]" \
