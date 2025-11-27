@@ -554,111 +554,21 @@ v1 模型采用 Bi-Encoder 指针网络架构，相比 v0 模型具有以下优�
 
 #### 实验分析
 
-通过对比 v2 和 v1 的实验结果，我们发现：
-
 **1. Flamingo-3B 模型（3.4.1）**
 
-**v2 (num_layers=3) 与 v1 的全面对比**：
+**总体表现**：**v2 (num_layers=3) 与 v1 相当，各有优势**。
 
-- **Sample Num=100**：
-  - **Shot 1**：v1 占优（22.60% vs 22.20%），v1 在 RandSampler 和 ImgSimSampler 上优于 v2，在 TextSimSampler 和 MixSampler 上与 v2 相同。
-  - **Shot 2**：v1 占优（27.40% vs 25.60%-27.00%），v1 在 RandSampler 和 ImgSimSampler 上优于 v2，在 TextSimSampler 和 MixSampler 上与 v2 相同。
-  - **Shot 3**：v2 占优或相等（27.00% vs 24.00%-27.00%），v2 在所有 sampler 上都达到 27.00%，明显优于 v1 的 24.00%（RandSampler/ImgSimSampler），与 v1 的 27.00%（TextSimSampler/MixSampler）相同。
-  - **Shot 4**：v2 占优或相等（26.60%-28.20% vs 24.00%-28.20%），v2 在 RandSampler 上优于 v1（26.60% vs 24.00%），在 TextSimSampler 和 MixSampler 上与 v1 相同（28.20%），在 ImgSimSampler 上优于 v1（28.20% vs 24.00%）。
-
-- **Sample Num=200**：
-  - **Shot 1**：v1 占优（22.30%-22.80% vs 20.90%-21.20%），v1 在所有 sampler 上都优于 v2。
-  - **Shot 2**：v1 占优或相等（24.90%-25.20% vs 24.50%-25.20%），v1 在 RandSampler 上优于 v2（24.90% vs 24.50%），在其他 sampler 上与 v2 相同（25.20%）。
-  - **Shot 3**：v2 占优或相等（23.90% vs 22.20%-23.90%），v2 在所有 sampler 上都达到 23.90%，明显优于 v1 的 22.20%（RandSampler/ImgSimSampler），与 v1 的 23.90%（TextSimSampler/MixSampler）相同。
-  - **Shot 4**：v2 占优或相等（24.00%-24.80% vs 22.60%-24.80%），v2 在 RandSampler 上优于 v1（24.00% vs 23.10%），在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同（24.80%）。
-
-- **Sample Num=300**：
-  - **Shot 1**：v1 占优（21.60%-21.93% vs 20.60%-21.33%），v1 在所有 sampler 上都优于 v2。
-  - **Shot 2**：v1 占优或相等（23.00%-24.07% vs 22.93%-24.07%），v1 在 RandSampler 上略优于 v2（23.00% vs 22.93%），在其他 sampler 上与 v2 相同（24.07%）。
-  - **Shot 3**：v2 占优或相等（24.40%-24.73% vs 23.00%-24.73%），v2 在 RandSampler 上优于 v1（24.40% vs 23.00%），在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同（24.73%）。
-  - **Shot 4**：v2 占优或相等（24.67%-25.20% vs 23.80%-25.20%），v2 在 RandSampler 上优于 v1（24.67% vs 24.13%），在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同（25.20%）。
-
-- **关键发现**：
-  - **v2 (num_layers=3) 在高 shot 数场景下（Shot 3-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num 下都表现优异。
-  - **v2 的鲁棒性**：v2 (num_layers=3) 在不同 Sample Num 下，同一 shot 数时所有 sampler 的结果高度一致（如 Sample Num=100 时，Shot 3 所有 sampler 都是 27.00%），说明模型对不同采样策略具有良好的鲁棒性。
-  - **v1 的优势**：v1 在低 shot 数场景下（Shot 1-2）仍然保持优势，特别是在 Sample Num=100-300 时。
-
-- **原因分析**：
-  - v2 (num_layers=3) 通过多层 Cross-Attention 机制，能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。
-  - 在低 shot 数场景下，v1 的纯 Bi-Encoder 架构可能更简单直接，能够更快速地做出决策，因此表现更好。
+- **v2 的优势**：在高 shot 数场景下（Shot 3-4），v2 在所有 Sample Num（100、200、300）下都达到或超过 v1 的性能，特别是在 Shot 3 时表现优异。v2 在不同 sampler 下结果高度一致，具有良好的鲁棒性。
+- **v1 的优势**：在低 shot 数场景下（Shot 1-2），v1 仍然保持优势。
+- **原因**：v2 通过多层 Cross-Attention（3 层）能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。在低 shot 数场景下，v1 的纯 Bi-Encoder 架构更简单直接，能够更快速地做出决策。
 
 **2. Qwen2.5-VL-3B-Instruct 模型（3.4.2）**
 
-**v2 (num_layers=3) 相比 v2 (num_layers=2) 的改进**：
-- **重大突破**：通过将 Cross-Attention 层数从 2 层增加到 3 层，v2 在高 shot 数场景下的性能得到显著提升。
-- **改进效果（不同 Sample Num）**：
-  - **Sample Num=100**：v2 (num_layers=3) 在 Shot 3-4 时，所有 sampler 都达到 62.80% 和 61.40%，相比 v2 (num_layers=2) 的 59.80%-61.20% 有显著提升（提升 1.60%-3.00%）。
-  - **Sample Num=200**：v2 (num_layers=3) 在 Shot 2-3 时，所有 sampler 都达到 56.10%-56.30% 和 55.50%，相比 v2 (num_layers=2) 的 53.60%-55.50% 有明显提升（提升 0.30%-1.90%）。
-  - **Sample Num=300**：v2 (num_layers=3) 在 Shot 2-3 时，所有 sampler 都达到 54.00%-54.13% 和 53.73%，相比 v2 (num_layers=2) 的 50.73%-54.13% 有显著提升（提升 0.73%-3.00%）。
-- **原因分析**：多层 Cross-Attention（3 层）能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。
+**总体表现**：**v2 (num_layers=3) 优于 v1**。
 
-**v2 (num_layers=3) 与 v1 的全面对比**：
-
-- **Sample Num=100**：
-  - **Shot 1-2**：v1 占优（64.40%-64.80% vs 63.80%），v1 在所有 sampler 上都优于 v2。
-  - **Shot 3**：v2 占优（62.80% vs 59.80%-62.80%），v2 在所有 sampler 上都达到 62.80%，明显优于 v1 的 59.80%（RandSampler/TextSimSampler），与 v1 的 62.80%（ImgSimSampler/MixSampler）相同。
-  - **Shot 4**：v2 占优（61.40% vs 60.80%-61.40%），v2 在所有 sampler 上都达到 61.40%，优于 v1 的 60.80%（RandSampler/TextSimSampler），与 v1 的 61.40%（ImgSimSampler/MixSampler）相同。
-
-- **Sample Num=200**：
-  - **Shot 1**：v1 占优（57.40%-57.80% vs 56.70%-56.90%），v1 在所有 sampler 上都优于 v2。
-  - **Shot 2**：v2 占优或相等（56.10%-56.30% vs 55.30%-56.30%），v2 在 RandSampler、TextSimSampler 和 MixSampler 上优于 v1，在 ImgSimSampler 上与 v1 相同。
-  - **Shot 3**：v2 占优或相等（55.50% vs 53.60%-55.50%），v2 在所有 sampler 上都达到 55.50%，明显优于 v1 的 53.60%（RandSampler/TextSimSampler），与 v1 的 55.50%（ImgSimSampler）相同，优于 v1 的 55.20%（MixSampler）。
-  - **Shot 4**：v2 与 v1 接近或相等（54.70%-54.90% vs 54.90%），v2 在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同，在 RandSampler 上略低于 v1。
-
-- **Sample Num=300**：
-  - **Shot 1**：v1 略优（55.47%-55.80% vs 55.47%-55.53%），v1 在 RandSampler、TextSimSampler 和 MixSampler 上略优于 v2。
-  - **Shot 2**：v2 占优或相等（54.00%-54.13% vs 53.27%-54.13%），v2 在 RandSampler、TextSimSampler 和 MixSampler 上优于 v1，在 ImgSimSampler 上与 v1 相同。
-  - **Shot 3**：v2 显著占优（53.73% vs 50.73%-53.73%），v2 在所有 sampler 上都达到 53.73%，明显优于 v1 的 50.73%（RandSampler/TextSimSampler），与 v1 的 53.73%（ImgSimSampler）相同，优于 v1 的 53.00%（MixSampler）。这是 v2 (num_layers=3) 最重要的优势。
-  - **Shot 4**：v2 占优或相等（52.07%-52.20% vs 51.80%-52.20%），v2 在 RandSampler 上优于 v1，在 TextSimSampler、ImgSimSampler 和 MixSampler 上与 v1 相同或优于 v1。
-
-- **关键发现**：
-  - **v2 (num_layers=3) 在高 shot 数场景下（Shot 2-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num 下都表现优异。
-  - **v2 的鲁棒性**：v2 (num_layers=3) 在不同 Sample Num 下，同一 shot 数时所有 sampler 的结果高度一致（如 Sample Num=100 时，Shot 3 所有 sampler 都是 62.80%），说明模型对不同采样策略具有良好的鲁棒性。
-  - **v1 的优势**：v1 在低 shot 数场景下（Shot 1）仍然保持优势，特别是在 Sample Num=100-200 时。
-
-- **总体评价**：
-  - **v2 (num_layers=3) 在高 shot 数场景下（Shot 2-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num 和所有 sampler 上都表现优异。
-  - 这一改进证明了**多层 Cross-Attention 架构的有效性**，通过增加层数能够更好地处理复杂的多示例关系，解决了之前单层或双层 Cross-Attention 在高 shot 数场景下的性能问题。
-  - **建议**：对于 Qwen2.5-VL-3B-Instruct 模型，**v2 (num_layers=3) 是更优的选择**，特别是在高 shot 数场景下（Shot 2-4）。在低 shot 数场景下（Shot 1），v1 仍有轻微优势，但 v2 的性能已经非常接近。
-
-**3. 总体结论**
-
-- **整体效果对比**：
-  - **Flamingo-3B 模型**：**v2 (num_layers=3) 在高 shot 数场景下（Shot 3-4）已经全面达到或超过 v1 的性能**，特别是在 Shot 3 时，v2 在所有 Sample Num（100、200、300）下都表现优异。在低 shot 数场景下（Shot 1-2），v1 仍然保持优势。这是 v2 架构改进的重要突破。
-  - **Qwen2.5-VL-3B-Instruct 模型**：**v2 (num_layers=3) 已经全面达到或超过 v1 的性能**，特别是在高 shot 数场景下（Shot 2-4），v2 在所有 Sample Num（100、200、300）下都表现优异。这是 v2 架构改进的重要突破。
-
-- **v2 (num_layers=2) 的局限性**：
-  - 虽然 v2 在 v1 的 Bi-Encoder 架构基础上增加了 Cross-Attention 机制，但单层或双层 Cross-Attention 的效果有限：
-    - 在高 shot 数场景下性能不如 v1
-    - 额外的交互机制增加了模型复杂度，但未能带来预期的性能提升
-
-- **v2 (num_layers=3) 的突破**：
-  - **多层 Cross-Attention（3 层）显著提升了 v2 的性能**，在 Flamingo-3B 和 Qwen2.5-VL-3B-Instruct 两个模型的高 shot 数场景下都取得了重要突破
-  - 通过增加 Cross-Attention 层数，v2 能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系
-  - **关键成果（Flamingo-3B）**：
-    - **Sample Num=100**：v2 在 Shot 3-4 时，所有 sampler 都达到 27.00% 和 26.60%-28.20%，优于或等于 v1
-    - **Sample Num=200**：v2 在 Shot 3-4 时，所有 sampler 都达到 23.90% 和 24.00%-24.80%，优于或等于 v1
-    - **Sample Num=300**：v2 在 Shot 3-4 时，所有 sampler 都达到 24.40%-24.73% 和 24.67%-25.20%，优于或等于 v1
-  - **关键成果（Qwen2.5-VL-3B-Instruct）**：
-    - **Sample Num=100**：v2 在 Shot 3-4 时，所有 sampler 都达到 62.80% 和 61.40%，明显优于 v1
-    - **Sample Num=200**：v2 在 Shot 2-3 时，所有 sampler 都达到 56.10%-56.30% 和 55.50%，优于或等于 v1
-    - **Sample Num=300**：v2 在 Shot 2-4 时，所有 sampler 都达到 54.00%-54.13%、53.73% 和 52.07%-52.20%，优于或等于 v1
-  - **鲁棒性优势**：v2 (num_layers=3) 在不同 Sample Num 下，同一 shot 数时所有 sampler 的结果高度一致（如 Flamingo-3B 在 Sample Num=100 时，Shot 3 所有 sampler 都是 27.00%），说明模型对不同采样策略具有良好的鲁棒性
-
-- **v1 的优势**：
-  - v1 的纯 Bi-Encoder 架构（无 Cross-Attention）虽然简单，但在大多数场景下表现稳定
-  - 对于 Flamingo-3B 模型，v1 在低 shot 数场景下（Shot 1-2）仍然保持优势
-  - 对于 Qwen2.5-VL-3B-Instruct 模型，v1 在低 shot 数场景下（Shot 1）仍有轻微优势，特别是在 Sample Num=100-200 时
-
-- **建议**：
-  - **Flamingo-3B 模型**：**v2 (num_layers=3) 在高 shot 数场景下（Shot 3-4）是更优的选择**，在所有 Sample Num（100、200、300）下都已经达到或超过 v1 的性能。在低 shot 数场景下（Shot 1-2），v1 仍然保持优势，但 v2 的性能已经非常接近。
-  - **Qwen2.5-VL-3B-Instruct 模型**：**v2 (num_layers=3) 是更优的选择**，特别是在高 shot 数场景下（Shot 2-4），v2 在所有 Sample Num 下都已经达到或超过 v1 的性能。在低 shot 数场景下（Shot 1），v1 仍有轻微优势，但 v2 的性能已经非常接近。
-  - 这一结果说明，**多层 Cross-Attention 架构的有效性取决于层数的选择**，3 层 Cross-Attention 能够更好地处理复杂的多示例关系，解决了之前单层或双层 Cross-Attention 的局限性
+- **v2 的优势**：在高 shot 数场景下（Shot 2-4），v2 在所有 Sample Num（100、200、300）下都达到或超过 v1 的性能，特别是在 Shot 3 时显著优于 v1（如 Sample Num=300 时，v2 达到 53.73%，明显优于 v1 的 50.73%-53.73%）。v2 在不同 sampler 下结果高度一致，具有良好的鲁棒性。
+- **v1 的优势**：在低 shot 数场景下（Shot 1），v1 仍有轻微优势，但 v2 的性能已经非常接近。
+- **原因**：多层 Cross-Attention（3 层）能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。这一改进证明了多层 Cross-Attention 架构的有效性，解决了之前单层或双层 Cross-Attention 在高 shot 数场景下的性能问题。
 
 ### 3.5 v3 推理结果
 
