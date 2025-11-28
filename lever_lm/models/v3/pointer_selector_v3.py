@@ -392,8 +392,21 @@ class PointerSelectorV3(nn.Module):
             if len(batch_ranking_losses) > 0:
                 ranking_loss = torch.stack(batch_ranking_losses).mean()
         
-        # 3. 加权组合
-        total_loss = self.ce_weight * ce_loss + self.ranking_loss_weight * ranking_loss
+        # 3. 动态调整排序损失权重（根据 shot_num）
+        # 高 shot 数时，排序信息更重要，增大权重（更激进的缩放，针对高shot数优化）
+        # shot_num=1: 权重 * 0.4, shot_num=2: 权重 * 1.0, shot_num=3: 权重 * 2.5, shot_num=4: 权重 * 5.0
+        if shot_num == 1:
+            dynamic_weight_scale = 0.4
+        elif shot_num == 2:
+            dynamic_weight_scale = 1.0
+        elif shot_num == 3:
+            dynamic_weight_scale = 2.5
+        else:  # shot_num >= 4
+            dynamic_weight_scale = 5.0
+        effective_ranking_weight = self.ranking_loss_weight * dynamic_weight_scale
+        
+        # 4. 加权组合
+        total_loss = self.ce_weight * ce_loss + effective_ranking_weight * ranking_loss
         
         return total_loss
     
@@ -407,6 +420,10 @@ class PointerSelectorV3(nn.Module):
         Listwise排序损失：KL散度
         
         让模型的候选分布接近beam分数的分布
+        改进：
+        1. 只使用 top-k beams（忽略低质量 beam）
+        2. 考虑候选在 beam 序列中的位置（位置越靠前，重要性越高）
+        3. 动态温度参数（根据候选得分范围调整）
         """
         batch_size, shot_num, K = logits.shape
         device = logits.device
@@ -414,25 +431,90 @@ class PointerSelectorV3(nn.Module):
         # 构建候选ID到位置的映射
         cand_to_pos = {int(cand_id): pos for pos, cand_id in enumerate(cands)}
         
-        # 收集每个候选的得分
-        candidate_scores = defaultdict(list)
+        # 按 beam 分数排序，只使用 top-k beams（保留前 50% 或至少 2 个）
+        if len(all_beams_info) == 0:
+            return torch.tensor(0.0, device=device)
         
-        for beam in all_beams_info:
+        # 按分数排序 beams
+        sorted_beams = sorted(all_beams_info, key=lambda x: x["score"], reverse=True)
+        # 只使用 top-k beams（更严格的选择：高shot数时只保留前20%，低shot数时保留前50%）
+        # 高shot数时，beam质量差异更明显，只关注最高质量的beams
+        if shot_num >= 3:
+            top_k_ratio = 0.2  # 高shot数：只保留前20%（更严格）
+        else:
+            top_k_ratio = 0.5  # 低shot数：保留前50%
+        top_k = max(2, int(len(sorted_beams) * top_k_ratio))
+        top_beams = sorted_beams[:top_k]
+        
+        # 收集每个候选的得分（考虑位置权重：位置越靠前，权重越大）
+        candidate_weighted_scores = defaultdict(lambda: {'sum': 0.0, 'weight': 0.0})
+        
+        # 归一化 top beams 的分数作为权重
+        top_beam_scores = [beam["score"] for beam in top_beams]
+        top_beam_scores_tensor = torch.tensor(top_beam_scores, device=device)
+        beam_weights = F.softmax(top_beam_scores_tensor, dim=0)
+        
+        for beam_idx, beam in enumerate(top_beams):
             beam_seq = beam["id_seq"][:-1]  # 去掉末尾的query_id
-            score = beam["score"]
+            beam_weight = beam_weights[beam_idx].item()
             
-            for icd_id in beam_seq:
+            # 位置权重：序列中越靠前的候选，权重越大
+            # 高shot数时使用更激进的衰减，更强调序列前面的候选
+            if shot_num >= 4:
+                decay_rate = 0.6  # shot_num=4: 最激进（1.0, 0.6, 0.36, ...）
+            elif shot_num >= 3:
+                decay_rate = 0.65  # shot_num=3: 较激进（1.0, 0.65, 0.42, ...）
+            else:
+                decay_rate = 0.8  # shot_num<3: 较温和（1.0, 0.8, 0.64, ...）
+            for seq_pos, icd_id in enumerate(beam_seq):
                 if icd_id in cand_to_pos:
                     pos = cand_to_pos[icd_id]
-                    candidate_scores[pos].append(score)
+                    # 位置权重：高shot数时更激进，更强调序列前面的候选
+                    position_weight = decay_rate ** seq_pos
+                    # 综合权重 = beam权重 * 位置权重
+                    combined_weight = beam_weight * position_weight
+                    # 使用 beam 分数和综合权重
+                    candidate_weighted_scores[pos]['sum'] += beam["score"] * combined_weight
+                    candidate_weighted_scores[pos]['weight'] += combined_weight
         
-        # 计算每个候选的平均得分
+        # 计算每个候选的加权平均得分
         candidate_avg_scores = torch.zeros(K, device=device)
-        for pos, scores in candidate_scores.items():
-            candidate_avg_scores[pos] = float(np.mean(scores))
+        for pos, data in candidate_weighted_scores.items():
+            if data['weight'] > 0:
+                candidate_avg_scores[pos] = data['sum'] / data['weight']
+        
+        # 如果没有有效的候选得分，返回0
+        if candidate_avg_scores.sum() == 0:
+            return torch.tensor(0.0, device=device)
+        
+        # 动态温度参数：根据得分范围和 shot_num 调整
+        # 高 shot 数时使用更小的温度（更尖锐的分布），更强调排序差异
+        score_range = candidate_avg_scores.max() - candidate_avg_scores.min()
+        if score_range > 0:
+            # 基础温度：根据得分范围调整
+            base_temp = 0.3 + 0.2 * (1.0 - min(score_range / 10.0, 1.0))
+            # shot_num 越大，温度越小（更尖锐），高shot数时更激进
+            if shot_num >= 4:
+                # shot_num=4: 最激进的温度缩放
+                shot_temp_scale = 0.4  # 直接设置为0.4
+            elif shot_num >= 3:
+                # shot_num=3: 较激进的温度缩放
+                shot_temp_scale = 0.6
+            else:
+                # 低shot数：较温和的缩放
+                shot_temp_scale = 1.0 - 0.1 * (shot_num - 1)  # shot_num=1: 1.0, shot_num=2: 0.9
+            temperature = base_temp * max(shot_temp_scale, 0.3)  # 最小温度 0.3
+        else:
+            # 默认温度也根据 shot_num 调整，高shot数时更小（更激进）
+            if shot_num >= 4:
+                temperature = 0.15  # shot_num=4: 最小温度，最尖锐的分布
+            elif shot_num >= 3:
+                temperature = 0.25  # shot_num=3: 较小温度
+            else:
+                temperature = 0.5 - 0.05 * (shot_num - 1)  # shot_num=1: 0.5, shot_num=2: 0.45
+            temperature = max(temperature, 0.15)  # 最小温度 0.15（更激进）
         
         # 构建目标分布
-        temperature = 0.1
         target_dist = F.softmax(candidate_avg_scores / temperature, dim=-1)  # [K]
         
         # 模型的平均概率分布

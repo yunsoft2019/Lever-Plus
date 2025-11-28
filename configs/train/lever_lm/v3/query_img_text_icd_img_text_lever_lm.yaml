@@ -11,8 +11,8 @@ config:
   base_architecture: v2  # 使用 v2 作为基础架构（包含 Cross-Attention）
   use_cross_attention: null  # None 时根据 base_architecture 自动设置
   ranking_loss_type: listwise  # 'listwise' 或 'pairwise'
-  ranking_loss_weight: 0.5
-  ce_weight: 0.5
+  ranking_loss_weight: 0.35  # 排序损失基础权重（会动态调整：shot_num=1时*0.4, shot_num=2时*1.0, shot_num=3时*2.5, shot_num=4时*5.0）
+  ce_weight: 1.0  # 交叉熵权重（保持为1.0，确保基本分类任务的学习）
 
 # 适配器参数
 clip_name: openai/clip-vit-base-patch32

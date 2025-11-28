@@ -106,16 +106,16 @@ bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
 
 ```bash
 # 随机采样器（使用 GPU 0，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B
 
 # 文本相似度采样器（使用 GPU 1，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 5 query_img_text_icd_img_text text_sim_sampler flamingo_3B
 
 # 图片相似度采样器（使用 GPU 2，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 6 query_img_text_icd_img_text img_sim_sampler flamingo_3B
 
 # 混合采样器（使用 GPU 3，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B
 
 # v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v1
@@ -207,16 +207,16 @@ kill <PID>
 
 ```bash
 # 随机采样器（RandSampler，默认版本 v0）
-bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
+bash scripts/inference.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B
 
 # 文本相似度采样器（TextSimSampler，默认版本 v0）
-bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text text_sim_sampler flamingo_3B
+bash scripts/inference.sh vqa okvqa_local 5 query_img_text_icd_img_text text_sim_sampler flamingo_3B
 
 # 图片相似度采样器（ImgSimSampler，默认版本 v0）
-bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text img_sim_sampler flamingo_3B
+bash scripts/inference.sh vqa okvqa_local 6 query_img_text_icd_img_text img_sim_sampler flamingo_3B
 
 # 混合采样器（MixSampler，默认版本 v0）
-bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text mix_sampler flamingo_3B
+bash scripts/inference.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B
 
 # v1版本推理（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v1
@@ -574,27 +574,67 @@ v1 模型采用 Bi-Encoder 指针网络架构，相比 v0 模型具有以下优�
 
 **模型说明**: v3 模型采用灵活基础架构 + 排序学习（Ranking Learning）设计，可选择 v1（Bi-Encoder）或 v2（+ Cross-Attention）作为基础架构，利用束搜索的多个 beam 进行排序学习，损失函数为交叉熵（CE）+ 排序损失（Ranking Loss），通过 Listwise 或 Pairwise 方式提升 Top-k、NDCG、MRR 等排序指标。
 
-#### 3.5.1 Flamingo-3B 模型结果（LeverLM v3）
+#### 3.5.1 Flamingo-3B 模型结果
 
-| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
-|----------|-------------|----------------|---------------|------------|
-| 1        | 21.98       | -              | -             | -          |
-| 2        | 22.03       | -              | -             | -          |
-| 3        | 22.64       | -              | -             | -          |
-| 4        | **22.76**    | -              | -             | -          |
+| Sample Num | Shot Num | Model Name | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|------------|----------|------------|:-----------:|:-------------:|:------------:|:----------:|
+| 100 | 1 | v2 | 22.20 | 22.20 | 22.20 | 22.20 |
+| 100 | 1 | v3 | **22.60** | **22.60** | **22.60** | **22.60** |
+| 100 | 2 | v2 | 25.60 | 27.00 | 27.00 | 27.00 |
+| 100 | 2 | v3 | **27.40** | **27.40** | **27.40** | **27.40** |
+| 100 | 3 | v2 | **27.00** | **27.00** | **27.00** | **27.00** |
+| 100 | 3 | v3 | 24.00 | 24.00 | 24.00 | 24.00 |
+| 100 | 4 | v2 | **26.60** | **28.20** | **28.20** | **28.20** |
+| 100 | 4 | v3 | 24.00 | 24.00 | 24.00 | 24.00 |
+| 200 | 1 | v2 | 21.20 | **20.90** | 20.90 | **20.90** |
+| 200 | 1 | v3 | **22.80** | **22.80** | **22.80** | **22.80** |
+| 200 | 2 | v2 | **24.50** | **25.20** | **25.20** | **25.20** |
+| 200 | 2 | v3 | 24.40 | 24.40 | 24.40 | 24.40 |
+| 200 | 3 | v2 | **23.90** | **23.90** | **23.90** | **23.90** |
+| 200 | 3 | v3 | 22.20 | 22.20 | 22.20 | 22.20 |
+| 200 | 4 | v2 | **24.00** | **24.80** | **24.80** | **24.80** |
+| 200 | 4 | v3 | 22.60 | 22.60 | 22.60 | 22.60 |
+| 300 | 1 | v2 | 21.33 | 20.60 | 20.60 | 20.60 |
+| 300 | 1 | v3 | **21.93** | **21.93** | **21.93** | **21.93** |
+| 300 | 2 | v2 | **22.93** | **24.07** | **24.07** | **24.07** |
+| 300 | 2 | v3 | 22.67 | 22.67 | 22.67 | 22.67 |
+| 300 | 3 | v2 | **24.40** | **24.73** | **24.73** | **24.73** |
+| 300 | 3 | v3 | 23.00 | 23.00 | 23.00 | 23.00 |
+| 300 | 4 | v2 | **24.67** | **25.20** | **25.20** | **25.20** |
+| 300 | 4 | v3 | 23.80 | 23.80 | 23.80 | 23.80 |
 
-**最佳结果**: 22.76% (RandSampler, shot_num=4)
+**最佳结果**: 25.20% (TextSimSampler/ImgSimSampler, shot_num=4, v2)
 
-#### 3.5.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v3）
+#### 3.5.2 Qwen2.5-VL-3B-Instruct 模型结果
 
-| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
-|----------|-------------|----------------|---------------|------------|
-| 1        | **51.33**   | -              | -             | -          |
-| 2        | 47.23       | -              | -             | -          |
-| 3        | 46.86       | -              | -             | -          |
-| 4        | 46.94       | -              | -             | -          |
+| Sample Num | Shot Num | Model Name | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|------------|----------|------------|:-----------:|:-------------:|:------------:|:----------:|
+| 100 | 1 | v2 | 63.80 | 63.80 | **63.80** | 63.80 |
+| 100 | 1 | v3 | **64.80** | **64.80** | **63.80** | **64.80** |
+| 100 | 2 | v2 | 63.80 | 63.80 | 63.80 | 63.80 |
+| 100 | 2 | v3 | **64.40** | **64.40** | **65.80** | **64.40** |
+| 100 | 3 | v2 | **62.80** | **62.80** | **62.80** | **62.80** |
+| 100 | 3 | v3 | 59.80 | 59.80 | 62.20 | 59.80 |
+| 100 | 4 | v2 | **61.40** | **61.40** | 61.40 | **61.40** |
+| 100 | 4 | v3 | 60.80 | 60.80 | **61.80** | 60.80 |
+| 200 | 1 | v2 | 56.70 | 56.90 | **56.90** | 56.90 |
+| 200 | 1 | v3 | **57.80** | **57.80** | **58.30** | **57.80** |
+| 200 | 2 | v2 | **56.10** | **56.30** | **56.30** | **56.30** |
+| 200 | 2 | v3 | 55.90 | 55.90 | 56.10 | 55.90 |
+| 200 | 3 | v2 | **55.50** | **55.50** | **55.50** | **55.50** |
+| 200 | 3 | v3 | 53.60 | 53.60 | 54.10 | 53.60 |
+| 200 | 4 | v2 | 54.70 | **54.90** | **54.90** | **54.90** |
+| 200 | 4 | v3 | **54.90** | **54.90** | 54.20 | **54.90** |
+| 300 | 1 | v2 | **55.53** | 55.47 | 55.47 | 55.47 |
+| 300 | 1 | v3 | **55.53** | **55.53** | **56.00** | **55.53** |
+| 300 | 2 | v2 | **54.00** | **54.13** | **54.13** | **54.13** |
+| 300 | 2 | v3 | 53.27 | 53.27 | 53.80 | 53.27 |
+| 300 | 3 | v2 | **53.73** | **53.73** | **53.73** | **53.73** |
+| 300 | 3 | v3 | 50.73 | 50.73 | 51.93 | 50.73 |
+| 300 | 4 | v2 | **52.07** | **51.80** | **52.20** | **52.20** |
+| 300 | 4 | v3 | 51.80 | **51.80** | 51.53 | 51.80 |
 
-**最佳结果**: 51.33% (RandSampler, shot_num=1)
+**最佳结果**: 65.8% (ImgSimSampler, shot_num=2, v3)
 
 ### 3.6 v4 推理结果
 
