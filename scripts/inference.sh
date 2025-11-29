@@ -79,7 +79,7 @@ case "$dataset" in
 esac
 
 # 构建检查点目录和文件名模式
-# 添加版本目录支持：v0, v1, v2, v3, v4...
+# 添加版本目录支持：v0, v1, v2, v3...
 checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
 # 将模型名称中的特殊字符替换为下划线，用于文件名匹配（与训练脚本一致）
 model_name_safe=$(echo "$model_name" | sed 's/-/_/g' | sed 's/\./_/g')
@@ -149,7 +149,7 @@ run_inference() {
     # 根据版本选择不同的配置文件（与训练脚本保持一致）
     local train_config="${lever_lm}"
     if [ "${version}" != "v0" ]; then
-        # v1, v2, v3, v4 使用对应的配置文件
+        # v1, v2, v3 使用对应的配置文件
         train_config="${lever_lm}_${version}"
     fi
     

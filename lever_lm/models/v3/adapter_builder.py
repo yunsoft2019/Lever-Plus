@@ -46,11 +46,18 @@ def build_model_v3_with_adapter(
             shot_num=config_dict['shot_num'],
             label_smoothing=config_dict.get('label_smoothing', 0.0),
             dropout=config_dict.get('dropout', 0.5),
-            base_architecture=config_dict.get('base_architecture', 'v2'),
-            use_cross_attention=config_dict.get('use_cross_attention', None),
-            ranking_loss_type=config_dict.get('ranking_loss_type', 'listwise'),
-            ranking_loss_weight=config_dict.get('ranking_loss_weight', 0.5),
-            ce_weight=config_dict.get('ce_weight', 0.5)
+            hidden_dim=config_dict.get('hidden_dim', 256),
+            num_heads=config_dict.get('num_heads', 1),
+            attn_dropout=config_dict.get('attn_dropout', 0.1),
+            num_layers=config_dict.get('num_layers', 3),
+            # V3 特有参数
+            enable_rce=config_dict.get('enable_rce', False),
+            enable_grpo=config_dict.get('enable_grpo', False),
+            rce_temperature=config_dict.get('rce_temperature', 1.0),
+            ppo_epsilon=config_dict.get('ppo_epsilon', 0.2),
+            advantage_clip=config_dict.get('advantage_clip', 5.0),
+            kl_beta=config_dict.get('kl_beta', 0.01),
+            reward_norm=config_dict.get('reward_norm', 'zscore')
         )
     
     # 构建 v3 模型

@@ -118,7 +118,14 @@ def gen_data(
     # load several models will cost large memory at the same time.
     # use sleep to load one by one.
     sleep(cfg.sleep_time * rank)
-    interface = init_interface(cfg, device=process_device)
+    use_lora = cfg.get('use_lora', False)
+    lora_checkpoint_path = cfg.get('lora_checkpoint_path', None)
+    interface = init_interface(
+        cfg, 
+        device=process_device,
+        use_lora=use_lora,
+        lora_checkpoint_path=lora_checkpoint_path,
+    )
     if cfg.scorer == "infoscore":
         interface.tokenizer.padding_side = "right"
     elif cfg.scorer == "cider":
@@ -230,11 +237,15 @@ def main(cfg: DictConfig):
     scorer_str = str(cfg.scorer).replace('\uf03a', ':').replace('：', ':')
     construct_order_str = str(cfg.construct_order).replace('\uf03a', ':').replace('：', ':')
     
+    # 添加 LoRA 标识
+    use_lora = cfg.get('use_lora', False)
+    lora_suffix = "-lora" if use_lora else ""
+    
     save_file_name = (
         f"{cfg.task.task_name}-{cfg.dataset.name}-"
         f"{model_name_safe}-{cfg.sampler.sampler_name}-scorer:{scorer_str}-construct_order:{construct_order_str}-"
         f"beam_size:{cfg.beam_size}-few_shot:{cfg.few_shot_num}-"
-        f"candidate_num:{cfg.sampler.candidate_num}-sample_num:{cfg.sample_num}.json"
+        f"candidate_num:{cfg.sampler.candidate_num}-sample_num:{cfg.sample_num}{lora_suffix}.json"
     )
     
     # Final sanitization: replace any remaining non-standard characters

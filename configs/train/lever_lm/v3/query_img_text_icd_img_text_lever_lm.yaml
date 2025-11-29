@@ -8,11 +8,11 @@ config:
   shot_num: 2  # Changed from 6 to 2 (same as v1/v2)
   label_smoothing: 0.0
   dropout: 0.5
-  base_architecture: v2  # 使用 v2 作为基础架构（包含 Cross-Attention）
-  use_cross_attention: null  # None 时根据 base_architecture 自动设置
-  ranking_loss_type: listwise  # 'listwise' 或 'pairwise'
-  ranking_loss_weight: 0.35  # 排序损失基础权重（会动态调整：shot_num=1时*0.4, shot_num=2时*1.0, shot_num=3时*2.5, shot_num=4时*5.0）
-  ce_weight: 1.0  # 交叉熵权重（保持为1.0，确保基本分类任务的学习）
+  hidden_dim: 256
+  num_heads: 1
+  attn_dropout: 0.1
+  num_layers: 3
+  # V3 特有参数（离线强化学习）
 
 # 适配器参数
 clip_name: openai/clip-vit-base-patch32
@@ -20,4 +20,14 @@ query_encoding_flag: ['image', 'text']
 icd_encoding_flag: ['image', 'text']
 adapter: false
 norm: true
+cache_dir: null  # CLIP 模型缓存目录（可选），null 时使用默认缓存目录 ~/.cache/huggingface/
+
+# LoRA 配置
+use_lora: false  # 是否使用 LoRA 解冻 CLIP
+lora_config:  # LoRA 配置参数（仅在 use_lora=true 时生效）
+  r: 16  # LoRA rank
+  lora_alpha: 32  # LoRA alpha
+  target_modules: ['q_proj', 'v_proj', 'k_proj', 'out_proj']  # 目标模块（CLIP 的注意力层）
+  lora_dropout: 0.1  # LoRA dropout
+  bias: 'none'  # bias 处理方式
 

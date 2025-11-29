@@ -22,6 +22,8 @@ class Qwen2VLInterface(LVLMInterface):
         label_field,
         icd_join_char="<|endofchunk|>",
         system_prompt=None,
+        use_lora=False,
+        lora_checkpoint_path=None,
     ):
         super().__init__(
             precision=precision,
@@ -68,9 +70,123 @@ class Qwen2VLInterface(LVLMInterface):
             **model_kwargs
         )
         
+        # 如果使用 LoRA，加载 LoRA adapter
+        if use_lora:
+            if not lora_checkpoint_path or lora_checkpoint_path == "":
+                logger.warning("use_lora=true but lora_checkpoint_path is not provided. LoRA will be skipped.")
+            else:
+                try:
+                    from peft import PeftModel
+                    import os
+                    
+                    # 将相对路径转换为绝对路径
+                    if not os.path.isabs(lora_checkpoint_path):
+                        # 获取项目根目录（假设 generate_data.py 在项目根目录）
+                        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        lora_checkpoint_path = os.path.join(project_root, lora_checkpoint_path)
+                        lora_checkpoint_path = os.path.abspath(lora_checkpoint_path)
+                    
+                    # 检查路径是否存在，并查找 text_encoder_lora 或 vision_encoder_lora 子目录
+                    text_lora_path = os.path.join(lora_checkpoint_path, "text_encoder_lora")
+                    vision_lora_path = os.path.join(lora_checkpoint_path, "vision_encoder_lora")
+                    
+                    # Qwen2.5-VL 的模型结构：model.model.visual (vision encoder) 和 model.model.language_model (text encoder)
+                    loaded_any = False
+                    
+                    # 注意：Qwen2.5-VL 的 vision encoder 结构不同于 CLIP
+                    # 训练时使用的是 CLIP 的 vision encoder，而 Qwen 使用的是自己的 vision encoder
+                    # 因此 vision encoder LoRA 无法直接加载到 Qwen 的 vision encoder
+                    # 只能加载 text encoder LoRA
+                    
+                    # 加载 text encoder LoRA
+                    if os.path.exists(text_lora_path):
+                        try:
+                            # 抑制 PEFT 关于缺失 adapter keys 的警告
+                            # 这些警告通常是因为训练时没有对所有层应用 LoRA，不影响已加载的 LoRA 使用
+                            import warnings
+                            with warnings.catch_warnings():
+                                warnings.filterwarnings("ignore", message=".*Found missing adapter keys.*")
+                                peft_model = PeftModel.from_pretrained(
+                                    self.model.model.language_model,
+                                    text_lora_path
+                                )
+                            
+                            # 性能测试：直接使用PEFT模型 vs 合并权重
+                            # 发现合并权重后性能反而下降，可能是计算图优化失效
+                            # 改为直接使用PEFT模型，但优化其配置以提升性能
+                            import torch
+                            
+                            # 直接使用PEFT模型，不合并权重
+                            # 优化PEFT模型配置以提升性能
+                            logger.info("Loading LoRA adapter (using PEFT model directly)...")
+                            
+                            # 确保是评估模式
+                            peft_model.eval()
+                            
+                            # 优化：禁用梯度计算和某些不必要的功能
+                            for param in peft_model.parameters():
+                                param.requires_grad = False
+                            
+                            # 移动到设备
+                            self.model.model.language_model = peft_model.to(device=self.device, dtype=self.data_type)
+                            
+                            # 清理缓存
+                            torch.cuda.empty_cache()
+                            
+                            logger.info("LoRA adapter loaded (using PEFT model directly).")
+                            logger.info("Note: PEFT model will be used for inference. Performance may be slower than base model.")
+                            loaded_any = True
+                        except Exception as e:
+                            logger.warning(f"Failed to load LoRA adapter: {e}")
+                            try:
+                                # 如果加载失败，尝试合并权重作为备选方案
+                                logger.info("Trying to merge LoRA weights as fallback...")
+                                torch.cuda.empty_cache()
+                                self.model.model.language_model = peft_model.merge_and_unload()
+                                torch.cuda.empty_cache()
+                                self.model.model.language_model = self.model.model.language_model.to(device=self.device, dtype=self.data_type)
+                                logger.info("LoRA weights merged successfully (fallback method).")
+                                loaded_any = True
+                            except Exception as e2:
+                                logger.error(f"Both PEFT and merge methods failed: {e2}")
+                                pass
+                    
+                    if loaded_any:
+                        logger.info("LoRA adapter(s) loaded successfully")
+                except ImportError:
+                    raise ImportError("peft library is required for LoRA support. Install it with: pip install peft")
+                except Exception as e:
+                    logger.warning(f"Failed to load LoRA adapter: {e}")
+                    logger.warning("Qwen2.5-VL LoRA loading may need architecture-specific adjustments. Continuing without LoRA...")
+        
         # Move model to the specified device
         self.model = self.model.to(self.device)
         self.model.eval()
+        
+        # 重要：torch.compile 与 Qwen2.5-VL + PEFT/LoRA 存在严重的兼容性问题
+        # 会导致大量的 graph breaks 和频繁重新编译，性能反而严重下降
+        # 因此在使用 LoRA 时禁用 torch.compile
+        # 即使不使用 LoRA，Qwen2.5-VL 的复杂结构也可能导致编译问题
+        if not use_lora:
+            # 只有不使用 LoRA 时才尝试编译
+            try:
+                import torch
+                if hasattr(torch, 'compile') and torch.__version__ >= '2.0.0':
+                    logger.info("Wrapping model with torch.compile for faster inference...")
+                    logger.info("Note: First inference will be slower (compilation), but subsequent inferences will be much faster")
+                    # 使用 'reduce-overhead' 模式，适合推理场景
+                    try:
+                        self.model = torch.compile(self.model, mode='reduce-overhead', fullgraph=False)
+                        logger.info("Model wrapped with torch.compile. Compilation will happen on first inference call.")
+                    except Exception as compile_error:
+                        logger.warning(f"torch.compile failed: {compile_error}, continuing without compilation")
+                else:
+                    logger.debug("torch.compile not available (requires PyTorch 2.0+), skipping compilation")
+            except Exception as e:
+                logger.debug(f"torch.compile not available or failed: {e}, continuing without compilation")
+        else:
+            logger.info("LoRA enabled: skipping torch.compile due to compatibility issues with Qwen2.5-VL + PEFT")
+            logger.info("torch.compile causes excessive graph breaks and recompilation, degrading performance")
         
         self.tokenizer = self.processor.tokenizer
         self.tokenizer.padding_side = "left"

@@ -1,14 +1,14 @@
 """
-适配器构建函数：创建适配 v0 训练流程的 v4 模型
+适配器构建函数：创建适配 v0 训练流程的 v3 模型
 """
 from typing import Optional
 from omegaconf import DictConfig, OmegaConf
 
 from ..adapter import PointerSelectorAdapter
-from .pointer_selector_v4 import PointerSelectorV4, PointerSelectorV4Config, build_model_v4
+from .pointer_selector_v3 import PointerSelectorV3, PointerSelectorV3Config, build_model_v3
 
 
-def build_model_v4_with_adapter(
+def build_model_v3_with_adapter(
     config: DictConfig,
     clip_name: str = 'openai/clip-vit-base-patch32',
     query_encoding_flag: Optional[list] = None,
@@ -19,10 +19,10 @@ def build_model_v4_with_adapter(
     **kwargs
 ) -> PointerSelectorAdapter:
     """
-    构建适配 v0 训练流程的 v4 模型
+    构建适配 v0 训练流程的 v3 模型
     
     Args:
-        config: PointerSelectorV4Config 参数（DictConfig 或已实例化的对象）
+        config: PointerSelectorV3Config 参数（DictConfig 或已实例化的对象）
         clip_name: CLIP 模型名称
         query_encoding_flag: 查询编码标志（如 ['image', 'text']）
         icd_encoding_flag: ICD 编码标志（如 ['image', 'text']）
@@ -31,27 +31,26 @@ def build_model_v4_with_adapter(
         **kwargs: 其他参数（忽略）
     
     Returns:
-        PointerSelectorAdapter: 适配器包装的 v4 模型
+        PointerSelectorAdapter: 适配器包装的 v3 模型
     """
-    # 处理配置参数：可能是 DictConfig 或已实例化的 PointerSelectorV4Config
-    if isinstance(config, PointerSelectorV4Config):
+    # 处理配置参数：可能是 DictConfig 或已实例化的 PointerSelectorV3Config
+    if isinstance(config, PointerSelectorV3Config):
         # 已经实例化，直接使用
         pointer_config = config
     else:
         # 是 DictConfig，需要转换
         config_dict = OmegaConf.to_container(config, resolve=True)
-        pointer_config = PointerSelectorV4Config(
+        pointer_config = PointerSelectorV3Config(
             d_model=config_dict['d_model'],
             K=config_dict['K'],
             shot_num=config_dict['shot_num'],
             label_smoothing=config_dict.get('label_smoothing', 0.0),
             dropout=config_dict.get('dropout', 0.5),
-            base_architecture=config_dict.get('base_architecture', 'v2'),
-            use_cross_attention=config_dict.get('use_cross_attention', None),
-            ranking_loss_type=config_dict.get('ranking_loss_type', 'listwise'),
-            ranking_loss_weight=config_dict.get('ranking_loss_weight', 0.5),
-            ce_weight=config_dict.get('ce_weight', 0.5),
-            # V4 特有参数
+            hidden_dim=config_dict.get('hidden_dim', 256),
+            num_heads=config_dict.get('num_heads', 1),
+            attn_dropout=config_dict.get('attn_dropout', 0.1),
+            num_layers=config_dict.get('num_layers', 3),
+            # V3 特有参数
             enable_rce=config_dict.get('enable_rce', False),
             enable_grpo=config_dict.get('enable_grpo', False),
             rce_temperature=config_dict.get('rce_temperature', 1.0),
@@ -61,8 +60,8 @@ def build_model_v4_with_adapter(
             reward_norm=config_dict.get('reward_norm', 'zscore')
         )
     
-    # 构建 v4 模型
-    pointer_selector = build_model_v4(pointer_config)
+    # 构建 v3 模型
+    pointer_selector = build_model_v3(pointer_config)
     
     # 处理编码标志
     if query_encoding_flag is None:

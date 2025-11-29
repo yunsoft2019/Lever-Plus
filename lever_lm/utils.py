@@ -19,7 +19,7 @@ from transformers import (
 from open_mmicl.interface import FlamingoInterface, IDEFICSInterface, LLMInterface, Qwen2VLInterface
 
 
-def init_interface(cfg, **kwargs):
+def init_interface(cfg, use_lora=False, lora_checkpoint_path=None, **kwargs):
     if "flamingo" in cfg.infer_model.name:
         return FlamingoInterface(
             lang_encoder_path=cfg.infer_model.lang_encoder_path,
@@ -37,6 +37,8 @@ def init_interface(cfg, **kwargs):
             init_device=cfg.infer_model.init_device,
             image_field=cfg.task.image_field,
             label_field=cfg.task.output_column,
+            use_lora=use_lora,
+            lora_checkpoint_path=lora_checkpoint_path,
         )
     elif "idefics" in cfg.infer_model.name:
         return IDEFICSInterface(
@@ -64,6 +66,8 @@ def init_interface(cfg, **kwargs):
             image_field=cfg.task.image_field,
             label_field=cfg.task.output_column,
             system_prompt=cfg.infer_model.get("system_prompt", None),
+            use_lora=use_lora,
+            lora_checkpoint_path=lora_checkpoint_path,
         )
     elif "Qwen" in cfg.infer_model.name:
         from open_mmicl.interface.llm_interface import LLMInterface

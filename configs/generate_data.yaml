@@ -29,6 +29,10 @@ gpu_ids: [0]
 # use sleep to load one by one.
 sleep_time: 90
 
+# LoRA configuration
+use_lora: false  # 是否使用LoRA解冻CLIP，默认为false
+lora_checkpoint_path: null  # LoRA checkpoint 路径，例如: "results/okvqa/model_cpk/v3_lora/checkpoint.pt"
+
 log_level: "INFO"
 
 # hydra

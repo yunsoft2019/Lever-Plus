@@ -16,6 +16,9 @@ def build_model_v2_with_adapter(
     adapter: bool = False,
     norm: bool = True,
     device: Optional[str] = None,  # 设备参数，用于确保 CLIP 模型加载到正确的 GPU
+    use_lora: bool = False,  # 是否使用 LoRA
+    lora_config: Optional[dict] = None,  # LoRA 配置参数
+    cache_dir: Optional[str] = None,  # CLIP 模型缓存目录（可选）
     **kwargs
 ) -> PointerSelectorAdapter:
     """
@@ -66,6 +69,19 @@ def build_model_v2_with_adapter(
     elif isinstance(icd_encoding_flag, DictConfig):
         icd_encoding_flag = OmegaConf.to_container(icd_encoding_flag, resolve=True)
     
+    # 处理 lora_config：可能是 DictConfig 或 dict
+    if lora_config is not None and isinstance(lora_config, DictConfig):
+        lora_config = OmegaConf.to_container(lora_config, resolve=True)
+    
+    # 从 kwargs 中获取 cache_dir（如果配置文件中提供了）
+    if cache_dir is None:
+        cache_dir = kwargs.get('cache_dir', None)
+    # 如果 cache_dir 是 DictConfig，转换为字符串
+    if isinstance(cache_dir, DictConfig):
+        cache_dir = OmegaConf.to_container(cache_dir, resolve=True)
+        if cache_dir == 'null' or cache_dir is None:
+            cache_dir = None
+    
     # 创建适配器
     adapter_model = PointerSelectorAdapter(
         pointer_selector_model=pointer_selector,
@@ -76,6 +92,9 @@ def build_model_v2_with_adapter(
         norm=norm,
         K=pointer_config.K,
         device=device,  # 传递 device 参数，确保 CLIP 模型加载到正确的 GPU
+        use_lora=use_lora,  # 传递 use_lora 参数
+        lora_config=lora_config,  # 传递 lora_config 参数
+        cache_dir=cache_dir,  # 传递 cache_dir 参数
     )
     
     return adapter_model

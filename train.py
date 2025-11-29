@@ -21,6 +21,33 @@ from lever_lm.utils import data_split, collate_fn
 from utils import load_ds
 
 
+# LoRA checkpoint 保存回调
+class LoRACheckpointCallback(Callback):
+    """在保存 checkpoint 时同时保存 LoRA 权重"""
+    
+    def __init__(self, save_dir: str):
+        """
+        Args:
+            save_dir: LoRA checkpoint 保存目录
+        """
+        super().__init__()
+        self.save_dir = save_dir
+        import os
+        os.makedirs(save_dir, exist_ok=True)
+    
+    def on_save_checkpoint(self, trainer, pl_module, checkpoint):
+        """在保存 checkpoint 时调用"""
+        # 检查模型是否使用 LoRA
+        if hasattr(pl_module.lever_lm, 'use_lora') and pl_module.lever_lm.use_lora:
+            # 保存 LoRA checkpoint
+            pl_module.lever_lm.save_lora_checkpoint(self.save_dir)
+    
+    def on_train_end(self, trainer, pl_module):
+        """训练结束时保存最终的 LoRA checkpoint"""
+        if hasattr(pl_module.lever_lm, 'use_lora') and pl_module.lever_lm.use_lora:
+            pl_module.lever_lm.save_lora_checkpoint(self.save_dir)
+
+
 # 简洁表格输出回调
 class SimpleTableLogger(Callback):
     def __init__(self):
@@ -218,6 +245,17 @@ def main(cfg: DictConfig):
     callbacks = [
         vl_model_cpk_callback,  # 只保存 val_loss 最优的模型
     ]
+    
+    # 如果使用 LoRA，添加 LoRA checkpoint callback
+    # 检查配置中是否启用了 LoRA
+    use_lora = False
+    if hasattr(cfg.train, 'lever_lm') and hasattr(cfg.train.lever_lm, 'use_lora'):
+        use_lora = cfg.train.lever_lm.use_lora
+    
+    if use_lora:
+        # 创建 LoRA checkpoint 保存目录（与主 checkpoint 目录相同）
+        lora_save_dir = os.path.join(cfg.dirpath, "lora")
+        callbacks.append(LoRACheckpointCallback(save_dir=lora_save_dir))
     
     # 根据配置选择进度条和日志方式
     if use_simple_logger:

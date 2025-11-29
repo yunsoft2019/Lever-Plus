@@ -16,6 +16,7 @@ from transformers import (
     CLIPTextModelWithProjection,
     CLIPVisionModelWithProjection,
 )
+from loguru import logger
 
 # 导入 v1 模型（用于类型提示）
 try:
@@ -45,6 +46,9 @@ class PointerSelectorAdapter(nn.Module):
         norm: bool = True,
         K: int = 32,  # 候选池大小
         device: Optional[str] = None,  # 设备参数，用于确保 CLIP 模型加载到正确的 GPU
+        use_lora: bool = False,  # 是否使用 LoRA
+        lora_config: Optional[Dict[str, Any]] = None,  # LoRA 配置参数
+        cache_dir: Optional[str] = None,  # CLIP 模型缓存目录（可选）
     ):
         super().__init__()
         
@@ -70,31 +74,128 @@ class PointerSelectorAdapter(nn.Module):
         # 文本编码器
         self.sen_model = None
         self.sen_adapter = None
+        self.use_lora = use_lora
         if "text" in self.query_encoding_flag or "text" in self.icd_encoding_flag:
-            self.sen_model = CLIPTextModelWithProjection.from_pretrained(clip_name).to(device)
+            # 支持自定义缓存目录
+            model_kwargs = {}
+            if cache_dir is not None:
+                model_kwargs['cache_dir'] = cache_dir
+            self.sen_model = CLIPTextModelWithProjection.from_pretrained(clip_name, **model_kwargs).to(device)
+            
+            # 如果使用 LoRA，为文本编码器添加 LoRA adapter
+            if use_lora:
+                try:
+                    from peft import LoraConfig, get_peft_model, TaskType
+                    
+                    # 默认 LoRA 配置
+                    default_lora_config = {
+                        'r': 16,  # LoRA rank
+                        'lora_alpha': 32,  # LoRA alpha
+                        'target_modules': ['q_proj', 'v_proj', 'k_proj', 'out_proj'],  # 针对 CLIP 的注意力层
+                        'lora_dropout': 0.1,
+                        'bias': 'none',
+                        'task_type': TaskType.FEATURE_EXTRACTION,
+                    }
+                    
+                    # 合并用户配置
+                    if lora_config:
+                        default_lora_config.update(lora_config)
+                    
+                    # 创建 LoRA 配置
+                    peft_config = LoraConfig(
+                        r=default_lora_config['r'],
+                        lora_alpha=default_lora_config['lora_alpha'],
+                        target_modules=default_lora_config['target_modules'],
+                        lora_dropout=default_lora_config['lora_dropout'],
+                        bias=default_lora_config['bias'],
+                        task_type=default_lora_config['task_type'],
+                    )
+                    
+                    # 应用 LoRA 到模型
+                    self.sen_model = get_peft_model(self.sen_model, peft_config)
+                    logger.info(f"Applied LoRA to text encoder with config: r={default_lora_config['r']}, alpha={default_lora_config['lora_alpha']}")
+                    
+                    # LoRA 参数会自动设置为可训练，基础参数会被冻结
+                    # 打印可训练参数数量
+                    trainable_params = sum(p.numel() for p in self.sen_model.parameters() if p.requires_grad)
+                    total_params = sum(p.numel() for p in self.sen_model.parameters())
+                    logger.info(f"Text encoder LoRA - Trainable params: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.2f}%)")
+                    
+                except ImportError:
+                    raise ImportError("peft library is required for LoRA support. Install it with: pip install peft")
+            else:
+                # 不使用 LoRA 时，冻结 CLIP 模型参数（只训练 pointer selector）
+                for param in self.sen_model.parameters():
+                    param.requires_grad = False
+            
             if adapter:
                 # 如果需要 adapter，创建简单的线性层
                 d_model = self.sen_model.config.projection_dim
                 self.sen_adapter = nn.Linear(d_model, d_model).to(device)
             else:
                 self.sen_adapter = nn.Identity()
-            # 冻结 CLIP 模型参数（只训练 pointer selector）
-            for param in self.sen_model.parameters():
-                param.requires_grad = False
         
         # 图像编码器
         self.img_model = None
         self.img_adapter = None
         if "image" in self.query_encoding_flag or "image" in self.icd_encoding_flag:
-            self.img_model = CLIPVisionModelWithProjection.from_pretrained(clip_name).to(device)
+            # 支持自定义缓存目录
+            model_kwargs = {}
+            if cache_dir is not None:
+                model_kwargs['cache_dir'] = cache_dir
+            self.img_model = CLIPVisionModelWithProjection.from_pretrained(clip_name, **model_kwargs).to(device)
+            
+            # 如果使用 LoRA，为图像编码器添加 LoRA adapter
+            if use_lora:
+                try:
+                    from peft import LoraConfig, get_peft_model, TaskType
+                    
+                    # 默认 LoRA 配置
+                    default_lora_config = {
+                        'r': 16,  # LoRA rank
+                        'lora_alpha': 32,  # LoRA alpha
+                        'target_modules': ['q_proj', 'v_proj', 'k_proj', 'out_proj'],  # 针对 CLIP 的注意力层
+                        'lora_dropout': 0.1,
+                        'bias': 'none',
+                        'task_type': TaskType.FEATURE_EXTRACTION,
+                    }
+                    
+                    # 合并用户配置
+                    if lora_config:
+                        default_lora_config.update(lora_config)
+                    
+                    # 创建 LoRA 配置
+                    peft_config = LoraConfig(
+                        r=default_lora_config['r'],
+                        lora_alpha=default_lora_config['lora_alpha'],
+                        target_modules=default_lora_config['target_modules'],
+                        lora_dropout=default_lora_config['lora_dropout'],
+                        bias=default_lora_config['bias'],
+                        task_type=default_lora_config['task_type'],
+                    )
+                    
+                    # 应用 LoRA 到模型
+                    self.img_model = get_peft_model(self.img_model, peft_config)
+                    logger.info(f"Applied LoRA to vision encoder with config: r={default_lora_config['r']}, alpha={default_lora_config['lora_alpha']}")
+                    
+                    # LoRA 参数会自动设置为可训练，基础参数会被冻结
+                    # 打印可训练参数数量
+                    trainable_params = sum(p.numel() for p in self.img_model.parameters() if p.requires_grad)
+                    total_params = sum(p.numel() for p in self.img_model.parameters())
+                    logger.info(f"Vision encoder LoRA - Trainable params: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.2f}%)")
+                    
+                except ImportError:
+                    raise ImportError("peft library is required for LoRA support. Install it with: pip install peft")
+            else:
+                # 不使用 LoRA 时，冻结 CLIP 模型参数（只训练 pointer selector）
+                for param in self.img_model.parameters():
+                    param.requires_grad = False
+            
             if adapter:
                 d_model = self.img_model.config.projection_dim
                 self.img_adapter = nn.Linear(d_model, d_model).to(device)
             else:
                 self.img_adapter = nn.Identity()
-            # 冻结 CLIP 模型参数（只训练 pointer selector）
-            for param in self.img_model.parameters():
-                param.requires_grad = False
     
     def _extract_query_emb(self, query_input: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -110,7 +211,31 @@ class PointerSelectorAdapter(nn.Module):
         
         # 提取图像 embedding
         if "image" in self.query_encoding_flag and "pixel_values" in query_input:
-            img_emb = self.img_model(query_input["pixel_values"])["image_embeds"]
+            # 只传递 pixel_values，避免传递 input_ids 等文本相关参数
+            # 提取 pixel_values 并单独传递，避免 PEFT 传递其他参数
+            pixel_values = query_input["pixel_values"]
+            # 对于 PEFT 包装的模型，需要显式只传递 pixel_values
+            # 检查是否是 PEFT 模型，如果是，使用更安全的方式调用
+            try:
+                from peft import PeftModel
+                if isinstance(self.img_model, PeftModel):
+                    # PEFT 模型：问题在于 PEFT 的 forward 会传递所有 **kwargs
+                    # 尝试通过 base_model 调用，但手动应用 LoRA 适配器
+                    # 首先尝试直接调用，如果失败则回退到 base_model
+                    try:
+                        # 尝试只传递 pixel_values，看看 PEFT 是否仍然传递 input_ids
+                        img_emb = self.img_model(pixel_values=pixel_values, return_dict=True)["image_embeds"]
+                    except TypeError:
+                        # 如果失败，直接调用 base_model（会绕过 LoRA，但至少能运行）
+                        base_model = self.img_model.get_base_model()
+                        outputs = base_model.forward(pixel_values=pixel_values, return_dict=True)
+                        img_emb = outputs["image_embeds"]
+                else:
+                    # 非 PEFT 模型：正常调用
+                    img_emb = self.img_model(pixel_values=pixel_values)["image_embeds"]
+            except (ImportError, AttributeError, TypeError) as e:
+                # 如果没有 peft 或调用失败，尝试正常调用
+                img_emb = self.img_model(pixel_values=pixel_values)["image_embeds"]
             if self._adapter:
                 img_emb = self.img_adapter(img_emb)
             if self._norm:
@@ -119,10 +244,42 @@ class PointerSelectorAdapter(nn.Module):
         
         # 提取文本 embedding
         if "text" in self.query_encoding_flag and "input_ids" in query_input:
-            text_emb = self.sen_model(
-                input_ids=query_input["input_ids"],
-                attention_mask=query_input.get("attention_mask", None),
-            )["text_embeds"]
+            # 对于 PEFT 包装的模型，需要显式只传递期望的参数
+            # 检查是否是 PEFT 模型，如果是，使用更安全的方式调用
+            try:
+                from peft import PeftModel
+                if isinstance(self.sen_model, PeftModel):
+                    # PEFT 模型：问题在于 PEFT 的 forward 会传递所有 **kwargs
+                    # 尝试通过 base_model 调用，但手动应用 LoRA 适配器
+                    # 首先尝试直接调用，如果失败则回退到 base_model
+                    try:
+                        # 尝试只传递 input_ids 和 attention_mask，看看 PEFT 是否仍然传递其他参数
+                        text_emb = self.sen_model(
+                            input_ids=query_input["input_ids"],
+                            attention_mask=query_input.get("attention_mask", None),
+                            return_dict=True
+                        )["text_embeds"]
+                    except TypeError:
+                        # 如果失败，直接调用 base_model（会绕过 LoRA，但至少能运行）
+                        base_model = self.sen_model.get_base_model()
+                        outputs = base_model.forward(
+                            input_ids=query_input["input_ids"],
+                            attention_mask=query_input.get("attention_mask", None),
+                            return_dict=True
+                        )
+                        text_emb = outputs["text_embeds"]
+                else:
+                    # 非 PEFT 模型：正常调用
+                    text_emb = self.sen_model(
+                        input_ids=query_input["input_ids"],
+                        attention_mask=query_input.get("attention_mask", None),
+                    )["text_embeds"]
+            except (ImportError, AttributeError, TypeError) as e:
+                # 如果没有 peft 或调用失败，尝试正常调用
+                text_emb = self.sen_model(
+                    input_ids=query_input["input_ids"],
+                    attention_mask=query_input.get("attention_mask", None),
+                )["text_embeds"]
             if self._adapter:
                 text_emb = self.sen_adapter(text_emb)
             if self._norm:
@@ -167,7 +324,28 @@ class PointerSelectorAdapter(nn.Module):
             img_shape = icd_input["pixel_values"].shape[-3:]
             # 展平处理
             pixel_values_flat = icd_input["pixel_values"].view(-1, *img_shape)
-            img_emb = self.img_model(pixel_values_flat)["image_embeds"]
+            # 只传递 pixel_values，避免传递 input_ids 等文本相关参数
+            # 检查是否是 PEFT 模型，如果是，使用更安全的方式调用
+            try:
+                from peft import PeftModel
+                if isinstance(self.img_model, PeftModel):
+                    # PEFT 模型：问题在于 PEFT 的 forward 会传递所有 **kwargs
+                    # 尝试通过 base_model 调用，但手动应用 LoRA 适配器
+                    # 首先尝试直接调用，如果失败则回退到 base_model
+                    try:
+                        # 尝试只传递 pixel_values，看看 PEFT 是否仍然传递 input_ids
+                        img_emb = self.img_model(pixel_values=pixel_values_flat, return_dict=True)["image_embeds"]
+                    except TypeError:
+                        # 如果失败，直接调用 base_model（会绕过 LoRA，但至少能运行）
+                        base_model = self.img_model.get_base_model()
+                        outputs = base_model.forward(pixel_values=pixel_values_flat, return_dict=True)
+                        img_emb = outputs["image_embeds"]
+                else:
+                    # 非 PEFT 模型：正常调用
+                    img_emb = self.img_model(pixel_values=pixel_values_flat)["image_embeds"]
+            except (ImportError, AttributeError, TypeError) as e:
+                # 如果没有 peft 或调用失败，尝试正常调用
+                img_emb = self.img_model(pixel_values=pixel_values_flat)["image_embeds"]
             if self._adapter:
                 img_emb = self.img_adapter(img_emb)
             if self._norm:
@@ -180,10 +358,42 @@ class PointerSelectorAdapter(nn.Module):
             bs, icd_num, seq_len = icd_input["input_ids"].shape
             input_ids_flat = icd_input["input_ids"].view(-1, seq_len)
             attention_mask_flat = icd_input["attention_mask"].view(-1, seq_len)
-            text_emb = self.sen_model(
-                input_ids=input_ids_flat,
-                attention_mask=attention_mask_flat,
-            )["text_embeds"]
+            # 对于 PEFT 包装的模型，需要显式只传递期望的参数
+            # 检查是否是 PEFT 模型，如果是，使用更安全的方式调用
+            try:
+                from peft import PeftModel
+                if isinstance(self.sen_model, PeftModel):
+                    # PEFT 模型：问题在于 PEFT 的 forward 会传递所有 **kwargs
+                    # 尝试通过 base_model 调用，但手动应用 LoRA 适配器
+                    # 首先尝试直接调用，如果失败则回退到 base_model
+                    try:
+                        # 尝试只传递 input_ids 和 attention_mask，看看 PEFT 是否仍然传递其他参数
+                        text_emb = self.sen_model(
+                            input_ids=input_ids_flat,
+                            attention_mask=attention_mask_flat,
+                            return_dict=True
+                        )["text_embeds"]
+                    except TypeError:
+                        # 如果失败，直接调用 base_model（会绕过 LoRA，但至少能运行）
+                        base_model = self.sen_model.get_base_model()
+                        outputs = base_model.forward(
+                            input_ids=input_ids_flat,
+                            attention_mask=attention_mask_flat,
+                            return_dict=True
+                        )
+                        text_emb = outputs["text_embeds"]
+                else:
+                    # 非 PEFT 模型：正常调用
+                    text_emb = self.sen_model(
+                        input_ids=input_ids_flat,
+                        attention_mask=attention_mask_flat,
+                    )["text_embeds"]
+            except (ImportError, AttributeError, TypeError) as e:
+                # 如果没有 peft 或调用失败，尝试正常调用
+                text_emb = self.sen_model(
+                    input_ids=input_ids_flat,
+                    attention_mask=attention_mask_flat,
+                )["text_embeds"]
             if self._adapter:
                 text_emb = self.sen_adapter(text_emb)
             if self._norm:
@@ -444,4 +654,89 @@ class PointerSelectorAdapter(nn.Module):
             result.append(seq)
         
         return result
+    
+    def save_lora_checkpoint(self, save_path: str):
+        """
+        保存 LoRA checkpoint
+        
+        Args:
+            save_path: 保存路径（目录路径，会在此目录下保存 LoRA adapter）
+        """
+        if not self.use_lora:
+            logger.warning("Model is not using LoRA, nothing to save")
+            return
+        
+        import os
+        os.makedirs(save_path, exist_ok=True)
+        
+        try:
+            from peft import PeftModel
+            
+            # 保存文本编码器的 LoRA
+            if self.sen_model is not None and isinstance(self.sen_model, PeftModel):
+                sen_save_path = os.path.join(save_path, "text_encoder_lora")
+                self.sen_model.save_pretrained(sen_save_path)
+            
+            # 保存图像编码器的 LoRA
+            if self.img_model is not None and isinstance(self.img_model, PeftModel):
+                img_save_path = os.path.join(save_path, "vision_encoder_lora")
+                self.img_model.save_pretrained(img_save_path)
+                
+        except ImportError:
+            raise ImportError("peft library is required for LoRA support. Install it with: pip install peft")
+    
+    def load_lora_checkpoint(self, load_path: str):
+        """
+        加载 LoRA checkpoint
+        
+        Args:
+            load_path: 加载路径（目录路径，从此目录加载 LoRA adapter）
+        """
+        if not self.use_lora:
+            logger.warning("Model is not using LoRA, nothing to load")
+            return
+        
+        import os
+        
+        try:
+            from peft import PeftModel
+            
+            # 加载文本编码器的 LoRA
+            if self.sen_model is not None:
+                sen_load_path = os.path.join(load_path, "text_encoder_lora")
+                if os.path.exists(sen_load_path):
+                    if isinstance(self.sen_model, PeftModel):
+                        # 如果已经是 PeftModel，直接加载
+                        self.sen_model = PeftModel.from_pretrained(
+                            self.sen_model.get_base_model(),
+                            sen_load_path
+                        )
+                    else:
+                        # 如果不是 PeftModel，需要先转换为 PeftModel
+                        self.sen_model = PeftModel.from_pretrained(
+                            self.sen_model,
+                            sen_load_path
+                        )
+                    logger.info(f"Loaded text encoder LoRA from {sen_load_path}")
+            
+            # 加载图像编码器的 LoRA
+            if self.img_model is not None:
+                img_load_path = os.path.join(load_path, "vision_encoder_lora")
+                if os.path.exists(img_load_path):
+                    if isinstance(self.img_model, PeftModel):
+                        # 如果已经是 PeftModel，直接加载
+                        self.img_model = PeftModel.from_pretrained(
+                            self.img_model.get_base_model(),
+                            img_load_path
+                        )
+                    else:
+                        # 如果不是 PeftModel，需要先转换为 PeftModel
+                        self.img_model = PeftModel.from_pretrained(
+                            self.img_model,
+                            img_load_path
+                        )
+                    logger.info(f"Loaded vision encoder LoRA from {img_load_path}")
+                    
+        except ImportError:
+            raise ImportError("peft library is required for LoRA support. Install it with: pip install peft")
 

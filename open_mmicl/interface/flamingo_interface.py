@@ -54,6 +54,8 @@ class FlamingoInterface(LVLMInterface):
         icd_join_char="<|endofchunk|>",
         load_from_local=False,
         init_device="cpu",
+        use_lora=False,
+        lora_checkpoint_path=None,
     ) -> None:
         super().__init__(
             precision=precision,
@@ -94,6 +96,248 @@ class FlamingoInterface(LVLMInterface):
             )
 
         self.model.load_state_dict(torch.load(flamingo_checkpoint_dir), strict=False)
+
+        # 如果使用 LoRA，加载 LoRA adapter 到 vision encoder
+        if use_lora:
+            if not lora_checkpoint_path or lora_checkpoint_path == "":
+                logger.warning("use_lora=true but lora_checkpoint_path is not provided. LoRA will be skipped.")
+            else:
+                try:
+                    from peft import PeftModel
+                    import os
+                    
+                    # 将相对路径转换为绝对路径
+                    if not os.path.isabs(lora_checkpoint_path):
+                        # 获取项目根目录
+                        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        lora_checkpoint_path = os.path.join(project_root, lora_checkpoint_path)
+                        lora_checkpoint_path = os.path.abspath(lora_checkpoint_path)
+                    
+                    # 检查路径是否存在，如果不存在，尝试查找 vision_encoder_lora 子目录
+                    vision_lora_path = os.path.join(lora_checkpoint_path, "vision_encoder_lora")
+                    if os.path.exists(vision_lora_path):
+                        lora_checkpoint_path = vision_lora_path
+                        logger.info(f"Found vision encoder LoRA at: {lora_checkpoint_path}")
+                    elif not os.path.exists(lora_checkpoint_path):
+                        # 提供更详细的错误信息，但不抛出异常，允许继续运行
+                        logger.warning(f"LoRA checkpoint not found: {lora_checkpoint_path}")
+                        logger.warning("Please ensure you have trained a model with LoRA enabled (use version v3_lora).")
+                        logger.warning("LoRA checkpoint should be saved at: {}/vision_encoder_lora/".format(lora_checkpoint_path))
+                        logger.warning("Continuing without LoRA...")
+                        # 跳过 LoRA 加载
+                        lora_checkpoint_path = None
+                    
+                    # 如果路径存在，尝试加载 LoRA
+                    if lora_checkpoint_path and os.path.exists(lora_checkpoint_path):
+                        logger.info(f"Loading LoRA adapter from {lora_checkpoint_path}")
+                        try:
+                            # 抑制 PEFT 关于缺失 adapter keys 的警告
+                            # 这些警告通常是因为训练时没有对所有层应用 LoRA，不影响已加载的 LoRA 使用
+                            import warnings
+                            with warnings.catch_warnings():
+                                warnings.filterwarnings("ignore", message=".*Found missing adapter keys.*")
+                                # 加载 LoRA adapter 到 vision encoder
+                                peft_vision_encoder = PeftModel.from_pretrained(
+                                    self.model.vision_encoder,
+                                    lora_checkpoint_path
+                                )
+                            # 确保 LoRA 模型在正确的设备和数据类型上
+                            peft_vision_encoder = peft_vision_encoder.to(device=device, dtype=self.data_type)
+                            
+                            # 包装 PEFT 模型的 forward 和 __call__ 方法，确保位置参数被正确传递
+                            # Flamingo 调用 self.vision_encoder(vision_x) 时，vision_x 是位置参数
+                            # 我们需要在 PEFT 层捕获这个位置参数，并确保它被传递到底层模型
+                            base_model = peft_vision_encoder.get_base_model()
+                            
+                            # 使用 inspect 获取底层模型的 forward 签名
+                            import inspect
+                            import threading
+                            base_sig = inspect.signature(base_model.forward)
+                            base_params = set(base_sig.parameters.keys())
+                            
+                            # 使用 thread-local 存储来传递位置参数
+                            thread_local = threading.local()
+                            
+                            # 保存原始的 PEFT 和 base_model 方法
+                            original_peft_forward = peft_vision_encoder.forward
+                            original_peft_call = peft_vision_encoder.__call__
+                            original_base_forward = base_model.forward
+                            
+                            # 包装 PEFT 模型的 forward 方法
+                            # 关键：保存位置参数，以便在 base_model.forward 中使用
+                            def filtered_peft_forward(*args, **kwargs):
+                                # 如果有位置参数，保存它
+                                if len(args) > 0:
+                                    thread_local.saved_args = args
+                                    # 过滤掉不需要的关键字参数（如 input_ids, attention_mask 等）
+                                    filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                      if k in base_params}
+                                    # 调用原始的 PEFT forward，传递位置参数
+                                    return original_peft_forward(*args, **filtered_kwargs)
+                                else:
+                                    # 如果没有位置参数，检查 kwargs 中是否有 'x'
+                                    if 'x' in kwargs:
+                                        x_value = kwargs.pop('x')
+                                        thread_local.saved_args = (x_value,)
+                                        filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                          if k in base_params}
+                                        return original_peft_forward(x_value, **filtered_kwargs)
+                                    else:
+                                        # 尝试查找其他可能的输入键
+                                        possible_input_keys = ['pixel_values', 'input', 'inputs', 'image', 'images']
+                                        input_value = None
+                                        for key in possible_input_keys:
+                                            if key in kwargs:
+                                                input_value = kwargs.pop(key)
+                                                thread_local.saved_args = (input_value,)
+                                                break
+                                        
+                                        if input_value is not None:
+                                            filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                              if k in base_params}
+                                            return original_peft_forward(input_value, **filtered_kwargs)
+                                        else:
+                                            # 如果没有找到输入，清空 saved_args 并继续
+                                            thread_local.saved_args = None
+                                            filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                              if k in base_params}
+                                            return original_peft_forward(**filtered_kwargs)
+                            
+                            # 包装 PEFT 模型的 __call__ 方法
+                            def filtered_peft_call(*args, **kwargs):
+                                # 如果有位置参数，保存它
+                                if len(args) > 0:
+                                    thread_local.saved_args = args
+                                    # 过滤掉不需要的关键字参数
+                                    filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                      if k in base_params}
+                                    # 调用原始的 PEFT __call__，传递位置参数
+                                    return original_peft_call(*args, **filtered_kwargs)
+                                else:
+                                    # 如果没有位置参数，检查 kwargs 中是否有 'x'
+                                    if 'x' in kwargs:
+                                        x_value = kwargs.pop('x')
+                                        thread_local.saved_args = (x_value,)
+                                        filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                          if k in base_params}
+                                        return original_peft_call(x_value, **filtered_kwargs)
+                                    else:
+                                        # 尝试查找其他可能的输入键
+                                        possible_input_keys = ['pixel_values', 'input', 'inputs', 'image', 'images']
+                                        input_value = None
+                                        for key in possible_input_keys:
+                                            if key in kwargs:
+                                                input_value = kwargs.pop(key)
+                                                thread_local.saved_args = (input_value,)
+                                                break
+                                        
+                                        if input_value is not None:
+                                            filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                              if k in base_params}
+                                            return original_peft_call(input_value, **filtered_kwargs)
+                                        else:
+                                            # 如果没有找到输入，清空 saved_args 并继续
+                                            thread_local.saved_args = None
+                                            filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                              if k in base_params}
+                                            return original_peft_call(**filtered_kwargs)
+                            
+                            # 包装 base_model.forward，使用保存的位置参数
+                            def filtered_base_forward(*args, **kwargs):
+                                # 检测是否是语言模型的参数（不应该传递给 vision encoder）
+                                language_model_keys = {'input_ids', 'attention_mask', 'inputs_embeds', 
+                                                       'output_attentions', 'output_hidden_states', 'return_dict'}
+                                has_lm_params = bool(language_model_keys.intersection(kwargs.keys()))
+                                
+                                # 优先使用传入的位置参数
+                                if len(args) > 0:
+                                    final_args = args
+                                elif hasattr(thread_local, 'saved_args') and thread_local.saved_args is not None:
+                                    # 使用保存的位置参数（这是最可靠的方式）
+                                    final_args = thread_local.saved_args
+                                    if has_lm_params:
+                                        logger.debug("Detected language model parameters in kwargs, using saved_args instead")
+                                elif 'x' in kwargs:
+                                    # 从 kwargs 中提取 'x'
+                                    final_args = (kwargs.pop('x'),)
+                                else:
+                                    # 尝试查找其他可能的输入键
+                                    possible_input_keys = ['pixel_values', 'input', 'inputs', 'image', 'images']
+                                    final_args = None
+                                    for key in possible_input_keys:
+                                        if key in kwargs:
+                                            final_args = (kwargs.pop(key),)
+                                            break
+                                    
+                                    if final_args is None:
+                                        # 如果仍然找不到，优先检查是否有保存的参数
+                                        if hasattr(thread_local, 'saved_args') and thread_local.saved_args is not None:
+                                            final_args = thread_local.saved_args
+                                            logger.debug(f"Using saved_args from thread_local: {type(final_args[0]) if final_args else None}")
+                                        elif has_lm_params:
+                                            # 如果检测到语言模型参数，这可能是 PEFT 的错误调用
+                                            # 尝试使用 saved_args
+                                            if hasattr(thread_local, 'saved_args') and thread_local.saved_args is not None:
+                                                final_args = thread_local.saved_args
+                                                logger.warning("PEFT called base_model.forward with language model parameters, using saved_args")
+                                            else:
+                                                # 如果确实找不到，抛出清晰的错误
+                                                error_msg = (
+                                                    f"filtered_base_forward called with language model parameters but no valid input. "
+                                                    f"args={len(args)}, kwargs keys={list(kwargs.keys())}. "
+                                                    f"This usually means PEFT is calling base_model.forward with incorrect arguments. "
+                                                    f"Please check if the LoRA adapter is compatible with the vision encoder. "
+                                                    f"Thread-local saved_args: {getattr(thread_local, 'saved_args', 'not set')}"
+                                                )
+                                                logger.error(error_msg)
+                                                raise ValueError(error_msg)
+                                        else:
+                                            # 如果确实找不到，尝试使用第一个非 None 的 kwargs 值作为输入
+                                            # 这通常不应该发生，但作为最后的回退
+                                            logger.warning(f"filtered_base_forward called with no valid input: args={len(args)}, kwargs keys={list(kwargs.keys())}")
+                                            logger.warning("Attempting to use first non-None kwargs value as fallback")
+                                            for key, value in kwargs.items():
+                                                if value is not None and not isinstance(value, (bool, int, str, list)):
+                                                    # 可能是输入张量（torch.Tensor）
+                                                    if hasattr(value, 'shape'):  # 检查是否是张量
+                                                        final_args = (value,)
+                                                        logger.warning(f"Using '{key}' as input parameter (fallback)")
+                                                        break
+                                        
+                                        if final_args is None:
+                                            # 如果还是找不到，抛出清晰的错误
+                                            error_msg = (
+                                                f"filtered_base_forward called with no valid input. "
+                                                f"args={len(args)}, kwargs keys={list(kwargs.keys())}. "
+                                                f"This usually means PEFT is calling base_model.forward with incorrect arguments. "
+                                                f"Please check if the LoRA adapter is compatible with the vision encoder. "
+                                                f"Thread-local saved_args: {getattr(thread_local, 'saved_args', 'not set')}"
+                                            )
+                                            logger.error(error_msg)
+                                            raise ValueError(error_msg)
+                                
+                                # 过滤掉不需要的关键字参数
+                                filtered_kwargs = {k: v for k, v in kwargs.items() 
+                                                  if k in base_params}
+                                
+                                # 调用原始的 base_model.forward
+                                return original_base_forward(*final_args, **filtered_kwargs)
+                            
+                            # 替换方法
+                            peft_vision_encoder.forward = filtered_peft_forward
+                            peft_vision_encoder.__call__ = filtered_peft_call
+                            base_model.forward = filtered_base_forward
+                            
+                            self.model.vision_encoder = peft_vision_encoder
+                            logger.info("LoRA adapter loaded successfully")
+                        except Exception as load_error:
+                            logger.warning(f"Failed to load LoRA adapter: {load_error}")
+                            logger.warning("Continuing without LoRA...")
+                except ImportError:
+                    raise ImportError("peft library is required for LoRA support. Install it with: pip install peft")
+                except Exception as e:
+                    logger.warning(f"Failed to load LoRA adapter: {e}")
+                    logger.warning("Continuing without LoRA...")
 
         self.model.to(device=device, dtype=self.data_type, non_blocking=True)
         self.model.eval()
@@ -198,6 +442,9 @@ class FlamingoInterface(LVLMInterface):
             image_objects = torch.stack(
                 [self.image_processor(image) for image in image_objects], dim=0
             )
+            # 确保图像数据在正确的数据类型上（与模型的数据类型匹配）
+            if hasattr(self, 'data_type'):
+                image_objects = image_objects.to(dtype=self.data_type)
             all_raw_texts.append(full_text)
             all_images.append(image_objects)
 
@@ -234,11 +481,21 @@ class FlamingoInterface(LVLMInterface):
         output_images = torch.stack(output_images)
         output_attention_masks = text_tensor_input["attention_mask"]
 
+        # 确保所有输入数据在正确的设备和数据类型上（与模型匹配）
+        vision_x = output_images.unsqueeze(dim=2)
+        if hasattr(self, 'data_type'):
+            vision_x = vision_x.to(dtype=self.data_type)
+        if hasattr(self, 'device'):
+            vision_x = vision_x.to(device=self.device)
+            # 同时确保 lang_x 和 attention_mask 也在正确的设备上
+            output_input_ids = output_input_ids.to(device=self.device)
+            output_attention_masks = output_attention_masks.to(device=self.device)
+
         return BatchFeature(
             data={
                 "lang_x": output_input_ids,
                 "attention_mask": output_attention_masks,
-                "vision_x": output_images.unsqueeze(dim=2),
+                "vision_x": vision_x,
             }
         )
 

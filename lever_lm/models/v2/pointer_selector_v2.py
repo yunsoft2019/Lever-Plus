@@ -84,11 +84,11 @@ class PointerSelectorV2(nn.Module):
         # 使用 ModuleList 存储多层 Cross-Attention 和对应的 LayerNorm
         self.cross_attn_layers = nn.ModuleList([
             nn.MultiheadAttention(
-                embed_dim=hidden_dim,
-                num_heads=num_heads,
-                dropout=attn_dropout,
-                batch_first=True  # 输入格式 [B, L, D]
-            )
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=attn_dropout,
+            batch_first=True  # 输入格式 [B, L, D]
+        )
             for _ in range(num_layers)
         ])
         
@@ -183,12 +183,12 @@ class PointerSelectorV2(nn.Module):
         # 循环应用多层 Cross-Attention
         for layer_idx in range(self.num_layers):
             attn_output, _ = self.cross_attn_layers[layer_idx](
-                query=query_for_attn,      # [B, 1, 256]
-                key=cand_reduced,          # [B, K, 256]
-                value=cand_reduced         # [B, K, 256]
-            )
-            # 【重要】添加残差连接，稳定训练
-            # 标准 Transformer 做法：残差连接 + LayerNorm
+            query=query_for_attn,      # [B, 1, 256]
+            key=cand_reduced,          # [B, K, 256]
+            value=cand_reduced         # [B, K, 256]
+        )
+        # 【重要】添加残差连接，稳定训练
+        # 标准 Transformer 做法：残差连接 + LayerNorm
             query_for_attn = self.attn_norms[layer_idx](attn_output + query_for_attn)  # [B, 1, 256]
         
         query_enhanced = query_for_attn.squeeze(1)  # [B, 256]

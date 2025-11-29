@@ -58,10 +58,22 @@ def get_info_score(
     # 1. Variable image sizes across samples
     # 2. Different number of images per sample (different ICD counts)
     # 3. High memory usage
-    # But we can use batch_size=4 for better performance if memory allows
+    # 使用PEFT模型直接推理时，内存占用与原始模型相近，可以使用正常的batch_size
     if isinstance(interface, Qwen2VLInterface):
-        # Use batch_size=4 for better performance (can increase to 8 if memory allows)
-        batch_size = min(batch_size, 4)
+        # 可以通过环境变量 BATCH_SIZE_OVERRIDE 来覆盖默认值
+        import os
+        override_batch_size = os.getenv('BATCH_SIZE_OVERRIDE')
+        if override_batch_size:
+            try:
+                max_batch_size = int(override_batch_size)
+                batch_size = min(batch_size, max_batch_size)
+                logger.info(f"Using batch_size={batch_size} for Qwen2.5-VL (overridden from env)")
+            except ValueError:
+                batch_size = min(batch_size, 4)  # 默认值
+        else:
+            # 使用PEFT模型直接推理时，可以使用正常的batch_size（4）
+            # 因为PEFT模型的内存占用与原始模型相近
+            batch_size = min(batch_size, 4)
         logger.debug(f"Using batch_size={batch_size} for Qwen2.5-VL")
     
     # 1. 计算P(y|x)
@@ -122,7 +134,17 @@ def get_info_score(
             prompts,
             is_last_for_generation=False,
             add_eos_token=True,
-        ).to(interface.device)
+        )
+        # Qwen2.5-VL 的 prepare_input 返回 dict，已经包含 device 信息
+        # Flamingo 的 prepare_input 返回 tensor，需要移动到 device
+        if isinstance(add_new_icd_input, dict):
+            # 如果是 dict，确保所有 tensor 都在正确的 device 上
+            for key in add_new_icd_input.keys():
+                if isinstance(add_new_icd_input[key], torch.Tensor):
+                    add_new_icd_input[key] = add_new_icd_input[key].to(interface.device)
+        elif isinstance(add_new_icd_input, torch.Tensor):
+            # 如果是 tensor，直接移动到 device
+            add_new_icd_input = add_new_icd_input.to(interface.device)
         icd_mask_prompt_list = [
             interface.concat_prompt(
                 t[:-1],
@@ -148,11 +170,13 @@ def get_info_score(
         sub_info_score = new_cond_prob - cond_prob
         info_score_list.append(sub_info_score)
         
-        # Clear GPU cache periodically (every 10 batches) to prevent OOM
+        # Clear GPU cache periodically to prevent OOM
         # This is especially important for Qwen2.5-VL which uses more memory
-        # But we don't clear it every batch to avoid performance degradation
+        # 减少清理频率以提升性能，只在必要时清理
         if isinstance(interface, Qwen2VLInterface):
-            if len(info_score_list) % 10 == 0:
+            # 每20个batch清理一次缓存，减少性能影响
+            # 如果内存充足，可以进一步减少清理频率
+            if len(info_score_list) % 20 == 0 and len(info_score_list) > 0:
                 torch.cuda.empty_cache()
     return torch.cat(info_score_list)
 

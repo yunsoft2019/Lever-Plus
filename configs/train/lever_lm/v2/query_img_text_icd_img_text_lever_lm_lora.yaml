@@ -1,0 +1,31 @@
+_target_: lever_lm.models.v2.adapter_builder.build_model_v2_with_adapter
+
+# PointerSelectorV2Config 参数（传递给 build_model_v2 的 config 参数）
+config:
+  _target_: lever_lm.models.v2.pointer_selector_v2.PointerSelectorV2Config
+  d_model: 512 # Changed from 768 to 512 (CLIP base-patch32 outputs 512)
+  K: 2         # Changed from 32 to 2 (same as v1)
+  shot_num: 2  # Changed from 6 to 2 (same as v1)
+  label_smoothing: 0.0
+  dropout: 0.5
+  hidden_dim: 256
+  num_heads: 1
+  attn_dropout: 0.1
+  num_layers: 3
+
+# 适配器参数
+clip_name: openai/clip-vit-base-patch32
+query_encoding_flag: ['image', 'text']
+icd_encoding_flag: ['image', 'text']
+adapter: false
+norm: true
+cache_dir: null  # CLIP 模型缓存目录（可选），null 时使用默认缓存目录 ~/.cache/huggingface/
+
+# LoRA 配置（启用 LoRA）
+use_lora: true  # 使用 LoRA 解冻 CLIP
+lora_config:  # LoRA 配置参数
+  r: 16  # LoRA rank（可调整：8, 16, 32, 64）
+  lora_alpha: 32  # LoRA alpha（通常设置为 r 的 2 倍）
+  target_modules: ['q_proj', 'v_proj', 'k_proj', 'out_proj']  # 目标模块（CLIP 的注意力层）
+  lora_dropout: 0.1  # LoRA dropout（可调整：0.0, 0.1, 0.2）
+  bias: 'none'  # bias 处理方式（'none', 'all', 'lora_only'）
