@@ -50,6 +50,6 @@ python generate_data.py beam_size=5 \
                         dataset=${dataset} \
                         sampler=${sampler} \
                         infer_model=${beam_model} \
-                        few_shot_num=2 \
+                        few_shot_num=4 \
                         use_lora=false \
                         lora_checkpoint_path=""

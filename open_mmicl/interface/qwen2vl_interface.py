@@ -163,30 +163,13 @@ class Qwen2VLInterface(LVLMInterface):
         self.model = self.model.to(self.device)
         self.model.eval()
         
-        # 重要：torch.compile 与 Qwen2.5-VL + PEFT/LoRA 存在严重的兼容性问题
+        # 重要：torch.compile 与 Qwen2.5-VL 存在严重的兼容性问题
         # 会导致大量的 graph breaks 和频繁重新编译，性能反而严重下降
-        # 因此在使用 LoRA 时禁用 torch.compile
-        # 即使不使用 LoRA，Qwen2.5-VL 的复杂结构也可能导致编译问题
-        if not use_lora:
-            # 只有不使用 LoRA 时才尝试编译
-            try:
-                import torch
-                if hasattr(torch, 'compile') and torch.__version__ >= '2.0.0':
-                    logger.info("Wrapping model with torch.compile for faster inference...")
-                    logger.info("Note: First inference will be slower (compilation), but subsequent inferences will be much faster")
-                    # 使用 'reduce-overhead' 模式，适合推理场景
-                    try:
-                        self.model = torch.compile(self.model, mode='reduce-overhead', fullgraph=False)
-                        logger.info("Model wrapped with torch.compile. Compilation will happen on first inference call.")
-                    except Exception as compile_error:
-                        logger.warning(f"torch.compile failed: {compile_error}, continuing without compilation")
-                else:
-                    logger.debug("torch.compile not available (requires PyTorch 2.0+), skipping compilation")
-            except Exception as e:
-                logger.debug(f"torch.compile not available or failed: {e}, continuing without compilation")
-        else:
-            logger.info("LoRA enabled: skipping torch.compile due to compatibility issues with Qwen2.5-VL + PEFT")
-            logger.info("torch.compile causes excessive graph breaks and recompilation, degrading performance")
+        # 因此完全禁用 Qwen2.5-VL 的 torch.compile，使用稳定的 eager mode
+        # 即使不使用 LoRA，Qwen2.5-VL 的复杂结构也会导致大量 graph breaks
+        logger.info("Qwen2.5-VL: skipping torch.compile due to compatibility issues")
+        logger.info("torch.compile causes excessive graph breaks and recompilation, degrading performance")
+        logger.info("Using stable eager mode for better performance and stability")
         
         self.tokenizer = self.processor.tokenizer
         self.tokenizer.padding_side = "left"

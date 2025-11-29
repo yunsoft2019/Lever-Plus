@@ -168,6 +168,13 @@ def get_info_score(
             add_new_icd_input, mask_length=mask_length_list
         )
         sub_info_score = new_cond_prob - cond_prob
+        
+        # 统一计分方式：对于Qwen模型，将负数分数转换为正数（取绝对值）
+        # 这样可以与Flamingo的计分方式保持一致，都使用正数分数
+        if isinstance(interface, Qwen2VLInterface):
+            # Qwen的分数通常是接近0的负数，取绝对值使其与Flamingo的分数范围一致
+            sub_info_score = torch.abs(sub_info_score)
+        
         info_score_list.append(sub_info_score)
         
         # Clear GPU cache periodically to prevent OOM
