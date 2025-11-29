@@ -253,8 +253,10 @@ def main(cfg: DictConfig):
         use_lora = cfg.train.lever_lm.use_lora
     
     if use_lora:
-        # 创建 LoRA checkpoint 保存目录（与主 checkpoint 目录相同）
-        lora_save_dir = os.path.join(cfg.dirpath, "lora")
+        # 创建 LoRA checkpoint 保存目录
+        # 使用 checkpoint_filename 作为子目录名，避免不同配置互相覆盖
+        checkpoint_filename_prefix = cfg.get('checkpoint_filename', 'default')
+        lora_save_dir = os.path.join(cfg.dirpath, "lora", checkpoint_filename_prefix)
         callbacks.append(LoRACheckpointCallback(save_dir=lora_save_dir))
     
     # 根据配置选择进度条和日志方式

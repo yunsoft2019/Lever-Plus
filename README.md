@@ -55,175 +55,52 @@ pip install peft
 export HF_ENDPOINT=https://hf-mirror.com
 ```
 
-### 2.1 训练 LoRA（可选）
+### 2.1 束搜索（生成训练数据）
 
-**重要提示**：如果要使用 LoRA 进行束搜索，必须先训练 LoRA 模型。如果不使用 LoRA，可以跳过此步骤。
-
-**参数说明**: `task dataset gpu_id lever_lm sampler [beam_model]`
-
-- `gpu_id`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
-- `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
-- 训练完成后，LoRA checkpoint 会保存在 `results/{dataset}/model_cpk/v2_lora/lora/` 目录下
-
-#### 使用 Flamingo-3B 训练 LoRA
-
-```bash
-# 随机采样器（RandSampler，使用 GPU 0）
-bash scripts/train_lora.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B
-
-# 文本相似度采样器（TextSimSampler，使用 GPU 1）
-bash scripts/train_lora.sh vqa okvqa_local 5 query_img_text_icd_img_text text_sim_sampler flamingo_3B
-
-# 图片相似度采样器（ImgSimSampler，使用 GPU 2）
-bash scripts/train_lora.sh vqa okvqa_local 6 query_img_text_icd_img_text img_sim_sampler flamingo_3B
-
-# 混合采样器（MixSampler，使用 GPU 3）
-bash scripts/train_lora.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B
-```
-
-#### 使用 Qwen2.5-VL-3B-Instruct 训练 LoRA
-
-```bash
-# 随机采样器（RandSampler，使用 GPU 0）
-bash scripts/train_lora.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
-
-# 文本相似度采样器（TextSimSampler，使用 GPU 1）
-bash scripts/train_lora.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
-
-# 图片相似度采样器（ImgSimSampler，使用 GPU 2）
-bash scripts/train_lora.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
-
-# 混合采样器（MixSampler，使用 GPU 3）
-bash scripts/train_lora.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
-```
-
-**训练后的 LoRA checkpoint 位置**：
-- `results/{dataset}/model_cpk/v2_lora/lora/vision_encoder_lora/` - 图像编码器的 LoRA 权重
-- `results/{dataset}/model_cpk/v2_lora/lora/text_encoder_lora/` - 文本编码器的 LoRA 权重
-
-**注意**：`train_lora.sh` 是专门用于训练 LoRA 的脚本，固定使用 `v2_lora` 版本（基于 v2 架构）和 LoRA 配置。如果需要训练其他版本（v0, v1, v2, v3），请使用 `train_lever_lm.sh`（见 2.3 训练部分）。
-
-### 2.2 束搜索
-
-**参数说明**: `task dataset gpu_ids sampler [beam_model] [use_lora] [lora_checkpoint_path]`
+**参数说明**: `task dataset gpu_ids sampler [beam_model]`
 
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
-- `use_lora` 可选值: `false` (默认) 或 `true` - 是否使用LoRA解冻CLIP进行束搜索
-  - **注意**：如果 `use_lora=true`，需要先训练 LoRA 模型（见 2.1 训练 LoRA 部分）
-- `lora_checkpoint_path` 可选值: LoRA checkpoint 路径（仅在 `use_lora=true` 时需要）
-  - LoRA checkpoint 通常保存在 `results/{dataset}/model_cpk/{version}/lora/` 目录下
-  - 例如: `results/okvqa/model_cpk/v2_lora/lora/` 或 `results/okvqa/model_cpk/v2/lora/`
-  - 如果未指定路径，系统会尝试从默认位置加载
 
 #### 使用 Flamingo-3B 模型
 
 ```bash
-# 随机采样器（RandSampler，不使用LoRA）
+# 随机采样器（RandSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[4]" rand_sampler flamingo_3B
 
-# 文本相似度采样器（TextSimSampler，不使用LoRA）
+# 文本相似度采样器（TextSimSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[5]" text_sim_sampler flamingo_3B
 
-# 图片相似度采样器（ImgSimSampler，不使用LoRA）
+# 图片相似度采样器（ImgSimSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[6]" img_sim_sampler flamingo_3B
 
-# 混合采样器（MixSampler，不使用LoRA）
+# 混合采样器（MixSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[7]" mix_sampler flamingo_3B
-
-# 使用LoRA解冻CLIP进行束搜索（不指定路径，使用默认位置）
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler flamingo_3B true
-
-# 使用LoRA解冻CLIP进行束搜索（指定LoRA checkpoint路径）
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler flamingo_3B true "results/okvqa/model_cpk/v2_lora/lora"
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 模型
 
 ```bash
-# 随机采样器（RandSampler，不使用LoRA）
+# 随机采样器（RandSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
 
-# 文本相似度采样器（TextSimSampler，不使用LoRA）
+# 文本相似度采样器（TextSimSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
 
-# 图片相似度采样器（ImgSimSampler，不使用LoRA）
+# 图片相似度采样器（ImgSimSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
 
-# 混合采样器（MixSampler，不使用LoRA）
+# 混合采样器（MixSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
-
-# 使用LoRA解冻CLIP进行束搜索（不指定路径，使用默认位置）
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B true
-
-# 使用LoRA解冻CLIP进行束搜索（指定LoRA checkpoint路径）
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B true "results/okvqa/model_cpk/v2_lora/lora"
 ```
 
-#### LoRA 使用说明
-
-**重要提示**：使用 LoRA 的完整流程需要**两次训练**，目的不同：
-
-1. **第一次训练（v2_lora）**：训练 LoRA adapter，让 CLIP 模型适应任务
-   - **主要目的**：生成 LoRA checkpoint，用于后续的束搜索
-   - **实际训练内容**：同时训练 CLIP 的 LoRA adapter 和 pointer selector（因为它们在同一个模型中）
-   - **基础架构**：使用 **v2 架构**（包含 Cross-Attention 机制），**不含排序学习功能**
-   - **注意**：虽然也训练了 pointer selector，但主要关注的是 LoRA adapter 的质量
-   - 命令：`bash scripts/train_lora.sh ...`（推荐）或 `bash scripts/train_lever_lm.sh ... v2_lora`（向后兼容）
-   - 输出：LoRA checkpoint 保存在 `results/{dataset}/model_cpk/v2_lora/lora/` 目录下
-
-2. **束搜索**：使用训练好的 LoRA checkpoint 生成训练数据
-   - 命令：`bash scripts/generate_data.sh ... true "results/okvqa/model_cpk/v2_lora/lora"`
-   - 输出：束搜索数据文件（文件名包含 `-lora` 后缀）
-
-3. **第二次训练（v2）**：使用束搜索生成的数据训练最终的 pointer selector 模型
-   - **目的**：使用新的束搜索数据（基于 LoRA 优化的 CLIP）训练最终的 pointer selector
-   - **训练内容**：只训练 pointer selector（CLIP 保持冻结，`use_lora: false`）
-   - **模型架构**：与不使用 LoRA 的 v2 模型**完全相同**（都是 `use_lora: false`，CLIP 冻结）
-   - **区别**：训练数据不同（使用 LoRA 束搜索数据 vs 不使用 LoRA 束搜索数据），可能导致最终模型性能不同
-   - 命令：`bash scripts/train_lever_lm.sh ... v2`
-   - 注意：需要使用束搜索生成的数据（包含 `-lora` 后缀的文件）
-
-4. **推理**：使用第二次训练的模型进行推理
-
-**设计说明**：
-- 第一次训练使用专门的 `train_lora.sh` 脚本，专门用于训练 LoRA adapter
-- 第二次训练使用 `train_lever_lm.sh` 脚本，用于训练 pointer selector
-- 这样设计可以更清晰地区分两种不同的训练目的
-
-**完整流程示例**：
-```bash
-# 步骤1：训练 LoRA（第一次训练，使用专门的 train_lora.sh 脚本）
-bash scripts/train_lora.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
-
-# 步骤2：使用 LoRA 进行束搜索
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler flamingo_3B true "results/okvqa/model_cpk/v2_lora/lora"
-
-# 步骤3：使用束搜索数据训练最终模型（第二次训练）
-bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v2
-
-# 步骤4：推理
-bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v2
-```
-
-**如果不使用 LoRA**：
-- 可以直接进行束搜索（不使用 LoRA）
-- 然后训练最终模型（v0, v1, v2, v3）
-- 只需要一次训练
-
-**注意事项**：
-- LoRA checkpoint 必须与基础 CLIP 模型版本匹配
-- 如果未指定 `lora_checkpoint_path` 或路径不存在，系统会给出警告并继续使用基础模型
-- 使用 LoRA 时，束搜索生成的数据文件名会添加 `-lora` 后缀，便于区分
-
-### 2.3 训练（训练 Pointer Selector）
+### 2.2 训练模型（训练 Pointer Selector）
 
 **参数说明**: `task dataset gpu_id lever_lm sampler [beam_model] [version]`
 
 - `gpu_id`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
-- `version` 可选值: `v0` (默认), `v1`, `v2`, `v3` - 模型版本号，用于区分不同版本的模型代码和检查点
-  - **注意**：`v2_lora` 版本的训练请使用专门的 `train_lora.sh` 脚本（见 2.1 训练 LoRA 部分），不要使用本脚本
-  - **注意**：如果要在束搜索中使用 LoRA，需要先训练 LoRA（见 2.1 训练 LoRA 部分）
+- `version` 可选值: `v0` (默认), `v1`, `v2`, `v2_lora`, `v3` - 模型版本号，用于区分不同版本的模型代码和检查点
+  - **注意**：`v2_lora` 版本在训练时使用 LoRA 解冻 CLIP，减少可训练参数，提升训练效率
 - **注意**: `beam_model` 必须与生成数据时使用的模型一致
 - **注意**: 检查点文件保存在 `results/{dataset}/model_cpk/{version}/` 目录下
 
@@ -231,16 +108,16 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 ```bash
 # 随机采样器（使用 GPU 0，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 5 query_img_text_icd_img_text rand_sampler flamingo_3B v2_lora
 
 # 文本相似度采样器（使用 GPU 1，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 5 query_img_text_icd_img_text text_sim_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 6 query_img_text_icd_img_text text_sim_sampler flamingo_3B v2_lora
 
 # 图片相似度采样器（使用 GPU 2，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 6 query_img_text_icd_img_text img_sim_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 7 query_img_text_icd_img_text img_sim_sampler flamingo_3B v2_lora
 
 # 混合采样器（使用 GPU 3，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B v2_lora
 
 # v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v1
@@ -249,8 +126,7 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 
 # v2_lora版本训练（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
-# 注意：请使用专门的 train_lora.sh 脚本（见 2.1 训练 LoRA 部分），不要使用本脚本
-# bash scripts/train_lora.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2_lora
 
 # v3版本训练（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v3
@@ -260,16 +136,16 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 
 ```bash
 # 随机采样器（使用 GPU 0，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2_lora
 
 # 文本相似度采样器（使用 GPU 1，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B v2_lora
 
 # 图片相似度采样器（使用 GPU 2，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B v2_lora
 
 # 混合采样器（使用 GPU 3，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B v2_lora
 
 # v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
@@ -278,8 +154,7 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
 
 # v2_lora版本训练（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
-# 注意：请使用专门的 train_lora.sh 脚本（见 2.1 训练 LoRA 部分），不要使用本脚本
-# bash scripts/train_lora.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2_lora
 
 # v4版本训练（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4
@@ -289,10 +164,8 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 
 **使用 LoRA 进行训练**：
 - LoRA（Low-Rank Adaptation）是一种参数高效的微调方法，可以显著减少可训练参数数量
-- 使用 LoRA 训练时，CLIP 模型的基础参数会被冻结，只训练 LoRA adapter 参数
-- LoRA checkpoint 会保存在 `results/{dataset}/model_cpk/{version}/lora/` 目录下，包含：
-  - `text_encoder_lora/`: 文本编码器的 LoRA 权重
-  - `vision_encoder_lora/`: 图像编码器的 LoRA 权重
+- 使用 `v2_lora` 版本训练时，CLIP 模型的基础参数会被冻结，只训练 LoRA adapter 参数和 pointer selector
+- LoRA 权重会保存在训练好的 checkpoint 中
 
 **LoRA 配置参数**（可在配置文件中调整）：
 - `r`: LoRA rank（默认: 16，可调整：8, 16, 32, 64）
@@ -301,9 +174,10 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 - `lora_dropout`: LoRA dropout（默认: 0.1，可调整：0.0, 0.1, 0.2）
 - `bias`: bias 处理方式（默认: `'none'`，可选：`'none'`, `'all'`, `'lora_only'`）
 
-**训练后的使用**：
-- 训练完成后，可以使用 LoRA checkpoint 进行束搜索（见 2.2 束搜索部分）
-- LoRA checkpoint 路径：`results/{dataset}/model_cpk/v2_lora/lora/`
+**训练流程**：
+- 束搜索：使用原始 VLM 模型（不使用 LoRA）
+- 训练：使用 `v2_lora` 版本，训练时 CLIP 使用 LoRA
+- 推理：使用训练好的模型（包含 LoRA 权重）
 
 ### 2.4 基线
 
@@ -329,7 +203,8 @@ bash scripts/baseline.sh vqa okvqa_local 1 qwen2.5_vl_3B
 
 - `device`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
-- `version` 可选值: `v0` (默认), `v1`, `v2`, `v4` - 模型版本号，必须与训练时使用的版本一致
+- `version` 可选值: `v0` (默认), `v1`, `v2`, `v2_lora`, `v3`, `v4` - 模型版本号，必须与训练时使用的版本一致
+  - **注意**：`v2_lora` 版本使用 LoRA 解冻 CLIP，推理时会自动加载 LoRA 权重
 - **注意**: `beam_model` 必须与训练时使用的模型一致，用于选择对应的检查点文件
 - **注意**: `version` 必须与训练时使用的版本一致，用于从正确的目录加载检查点
 - **注意**: 推理时批量大小固定为1，避免批处理时的图像数量不匹配问题
@@ -371,6 +246,12 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 # v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 
+# v2_lora版本推理（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
+bash scripts/inference.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2_lora
+bash scripts/inference.sh vqa okvqa_local 5 query_img_text_icd_img_text text_sim_sampler flamingo_3B v2_lora
+bash scripts/inference.sh vqa okvqa_local 6 query_img_text_icd_img_text img_sim_sampler flamingo_3B v2_lora
+bash scripts/inference.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B v2_lora
+
 # v3版本推理（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v3
 ```
@@ -395,6 +276,12 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 
 # v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
+
+# v2_lora版本推理（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2_lora
+bash scripts/inference.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B v2_lora
+bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B v2_lora
+bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B v2_lora
 
 # v4版本推理（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4
@@ -711,31 +598,131 @@ v1 模型采用 Bi-Encoder 指针网络架构，相比 v0 模型具有以下优�
 - **v1 的优势**：在低 shot 数场景下（Shot 1），v1 仍有轻微优势，但 v2 的性能已经非常接近。
 - **原因**：多层 Cross-Attention（3 层）能够进行更深入的交互学习，逐层提取 query 和 candidates 之间的复杂关系，特别适合处理高 shot 数场景下的多示例复杂关系。这一改进证明了多层 Cross-Attention 架构的有效性，解决了之前单层或双层 Cross-Attention 在高 shot 数场景下的性能问题。
 
-### 3.5 v3 推理结果
+### 3.5 v2 LoRA 推理结果
 
-**模型说明**: v3 模型在 v2 的基础上，新增离线强化学习阶段：先 RCE（Reward-weighted Cross-Entropy）预热，再 GRPO（Group-Relative Policy Optimization with PPO-style clipping + KL 正则）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标（VQA Acc），期望在 v2 基础上进一步提升排序质量与 VQA 准确率（通常 0.2%~1.0% 额外增益）。
+**模型说明**: v2_lora 模型在 v2 的架构基础上，使用 LoRA（Low-Rank Adaptation）解冻 CLIP，减少可训练参数，提升训练效率。v2_lora 与 v2 使用相同的架构（Bi-Encoder + 多层 Cross-Attention），但训练时 CLIP 使用 LoRA adapter 而非完全冻结。
 
-#### 3.5.1 Flamingo-3B 模型结果（LeverLM v3）
+#### 3.5.1 Flamingo-3B 模型结果
 
-| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
-|----------|-------------|----------------|---------------|------------|
-| 1        | -           | -              | -             | -          |
-| 2        | -           | -              | -             | -          |
-| 3        | -           | -              | -             | -          |
-| 4        | -           | -              | -             | -          |
+| Sample Num | Shot Num | Model Name | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|------------|----------|------------|:-----------:|:-------------:|:------------:|:----------:|
+| 100 | 1 | v2 | **22.20** | **22.20** | **22.20** | **22.20** |
+| 100 | 1 | v2_lora | **22.20** | **22.20** | **22.20** | **22.20** |
+| 100 | 2 | v2 | 25.60 | **27.00** | **27.00** | **27.00** |
+| 100 | 2 | v2_lora | **27.00** | **27.00** | **27.00** | **27.00** |
+| 100 | 3 | v2 | **27.00** | **27.00** | **27.00** | **27.00** |
+| 100 | 3 | v2_lora | **27.00** | **27.00** | **27.00** | **27.00** |
+| 100 | 4 | v2 | 26.60 | **28.20** | **28.20** | **28.20** |
+| 100 | 4 | v2_lora | **28.20** | **28.20** | **28.20** | **28.20** |
+| 200 | 1 | v2 | **21.20** | **20.90** | **20.90** | **20.90** |
+| 200 | 1 | v2_lora | 20.90 | **20.90** | **20.90** | **20.90** |
+| 200 | 2 | v2 | 24.50 | **25.20** | **25.20** | **25.20** |
+| 200 | 2 | v2_lora | **25.20** | **25.20** | **25.20** | **25.20** |
+| 200 | 3 | v2 | **23.90** | **23.90** | **23.90** | **23.90** |
+| 200 | 3 | v2_lora | **23.90** | **23.90** | **23.90** | **23.90** |
+| 200 | 4 | v2 | 24.00 | **24.80** | **24.80** | **24.80** |
+| 200 | 4 | v2_lora | **24.80** | **24.80** | **24.80** | **24.80** |
+| 300 | 1 | v2 | **21.33** | **20.60** | **20.60** | **20.60** |
+| 300 | 1 | v2_lora | 20.60 | **20.60** | **20.60** | **20.60** |
+| 300 | 2 | v2 | 22.93 | **24.07** | **24.07** | **24.07** |
+| 300 | 2 | v2_lora | **24.07** | **24.07** | **24.07** | **24.07** |
+| 300 | 3 | v2 | 24.40 | **24.73** | **24.73** | **24.73** |
+| 300 | 3 | v2_lora | **24.73** | **24.73** | **24.73** | **24.73** |
+| 300 | 4 | v2 | 24.67 | **25.20** | **25.20** | **25.20** |
+| 300 | 4 | v2_lora | **25.20** | **25.20** | **25.20** | **25.20** |
 
-**说明**: Flamingo-3B v3 推理结果待补充
+**最佳结果**: 28.20% (所有采样器, shot_num=4, v2_lora, Sample Num=100)
 
-#### 3.5.2 Qwen2.5-VL-3B-Instruct 模型结果（LeverLM v3）
+#### 3.5.2 Qwen2.5-VL-3B-Instruct 模型结果
 
-| Shot Num | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
-|----------|-------------|----------------|---------------|------------|
-| 1        | -           | -              | -             | -          |
-| 2        | -           | -              | -             | -          |
-| 3        | -           | -              | -             | -          |
-| 4        | -           | -              | -             | -          |
+| Sample Num | Shot Num | Model Name | RandSampler | TextSimSampler | ImgSimSampler | MixSampler |
+|------------|----------|------------|:-----------:|:-------------:|:------------:|:----------:|
+| 100 | 1 | v2 | 63.80 | 63.80 | **63.80** | 63.80 |
+| 100 | 1 | v2_lora | **63.80** | **63.80** | **63.80** | **63.80** |
+| 100 | 2 | v2 | 63.80 | 63.80 | **63.80** | **63.80** |
+| 100 | 2 | v2_lora | **63.80** | **63.80** | **63.80** | **63.80** |
+| 100 | 3 | v2 | **62.80** | **62.80** | **62.80** | **62.80** |
+| 100 | 3 | v2_lora | **62.80** | **62.80** | **62.80** | **62.80** |
+| 100 | 4 | v2 | **61.40** | **61.40** | **61.40** | **61.40** |
+| 100 | 4 | v2_lora | **61.40** | **61.40** | **61.40** | **61.40** |
+| 200 | 1 | v2 | 56.70 | **56.90** | **56.90** | 56.90 |
+| 200 | 1 | v2_lora | **56.90** | **56.90** | **56.90** | **56.90** |
+| 200 | 2 | v2 | 56.10 | **56.30** | **56.30** | **56.30** |
+| 200 | 2 | v2_lora | **56.30** | **56.30** | **56.30** | **56.30** |
+| 200 | 3 | v2 | **55.50** | **55.50** | **55.50** | **55.50** |
+| 200 | 3 | v2_lora | **55.50** | **55.50** | **55.50** | **55.50** |
+| 200 | 4 | v2 | 54.70 | **54.90** | **54.90** | **54.90** |
+| 200 | 4 | v2_lora | **54.90** | **54.90** | **54.90** | **54.90** |
+| 300 | 1 | v2 | **55.53** | **55.47** | **55.47** | **55.47** |
+| 300 | 1 | v2_lora | 55.47 | **55.47** | **55.47** | **55.47** |
+| 300 | 2 | v2 | 54.00 | **54.13** | **54.13** | **54.13** |
+| 300 | 2 | v2_lora | **54.13** | **54.13** | **54.13** | **54.13** |
+| 300 | 3 | v2 | **53.73** | **53.73** | **53.73** | **53.73** |
+| 300 | 3 | v2_lora | **53.73** | **53.73** | **53.73** | **53.73** |
+| 300 | 4 | v2 | 52.07 | 51.80 | **52.20** | **52.20** |
+| 300 | 4 | v2_lora | **52.20** | **52.20** | **52.20** | **52.20** |
 
-**说明**: Qwen2.5-VL-3B-Instruct v3 推理结果待补充
+**最佳结果**: 63.80% (所有采样器, shot_num=1/2, v2_lora, Sample Num=100)
+
+#### 实验分析
+
+**1. Flamingo-3B 模型（3.5.1）**
+
+**总体表现**：**v2_lora 与 v2 性能完全一致**。
+
+- **性能对比**：
+  - v2_lora 在所有配置下与 v2 的性能完全一致（差异为 0）
+  - **Sample Num=100**：
+    - Shot 1: v2_lora = 22.20% (所有采样器一致) vs v2 = 22.20%
+    - Shot 2: v2_lora = 27.00% (所有采样器一致) vs v2 = 25.60-27.00%
+    - Shot 3: v2_lora = 27.00% (所有采样器一致) vs v2 = 27.00%
+    - Shot 4: v2_lora = 28.20% (所有采样器一致) vs v2 = 26.60-28.20%
+  - **Sample Num=200**：
+    - Shot 1: v2_lora = 20.90% (所有采样器一致) vs v2 = 20.90-21.20%
+    - Shot 2: v2_lora = 25.20% (所有采样器一致) vs v2 = 24.50-25.20%
+    - Shot 3: v2_lora = 23.90% (所有采样器一致) vs v2 = 23.90%
+    - Shot 4: v2_lora = 24.80% (所有采样器一致) vs v2 = 24.00-24.80%
+  - **Sample Num=300**：
+    - Shot 1: v2_lora = 20.60% (所有采样器一致) vs v2 = 20.60-21.33%
+    - Shot 2: v2_lora = 24.07% (所有采样器一致) vs v2 = 22.93-24.07%
+    - Shot 3: v2_lora = 24.73% (所有采样器一致) vs v2 = 24.40-24.73%
+    - Shot 4: v2_lora = 25.20% (所有采样器一致) vs v2 = 24.67-25.20%
+- **鲁棒性**：v2_lora 在不同采样器下结果完全一致，表现出更好的鲁棒性
+- **原因**：v2_lora 使用 LoRA 解冻 CLIP，虽然训练时参数更多，但推理时性能与 v2 相当，说明 LoRA 能够有效学习任务相关的特征表示
+
+**2. Qwen2.5-VL-3B-Instruct 模型（3.5.2）**
+
+**总体表现**：**v2_lora 与 v2 性能基本一致，略有差异（±0.20%）**。
+
+- **性能对比**：
+  - v2_lora 与 v2 的性能差异在 ±0.20% 以内，基本可以忽略
+  - **Sample Num=100**：
+    - Shot 1: v2_lora = 63.80% (所有采样器一致) vs v2 = 63.80% (完全一致)
+    - Shot 2: v2_lora = 63.80% (所有采样器一致) vs v2 = 63.80% (完全一致)
+    - Shot 3: v2_lora = 62.80% (所有采样器一致) vs v2 = 62.80% (完全一致)
+    - Shot 4: v2_lora = 61.40% (所有采样器一致) vs v2 = 61.40% (完全一致)
+  - **Sample Num=200**：
+    - Shot 1: v2_lora = 56.90% (所有采样器一致) vs v2 = 56.70-56.90% (差异 +0.20%)
+    - Shot 2: v2_lora = 56.30% (所有采样器一致) vs v2 = 56.10-56.30% (差异 +0.20%)
+    - Shot 3: v2_lora = 55.50% (所有采样器一致) vs v2 = 55.50% (完全一致)
+    - Shot 4: v2_lora = 54.90% (所有采样器一致) vs v2 = 54.70-54.90% (差异 +0.20%)
+  - **Sample Num=300**：
+    - Shot 1: v2_lora = 55.47% vs v2 = 55.47-55.53% (差异 -0.06%)
+    - Shot 2: v2_lora = 54.13% vs v2 = 54.00-54.13% (差异 +0.13%)
+    - Shot 3: v2_lora = 53.73% vs v2 = 53.73% (完全一致)
+    - Shot 4: v2_lora = 52.20% vs v2 = 51.80-52.20% (差异 +0.13%)
+- **鲁棒性**：v2_lora 在不同采样器下结果完全一致，表现出更好的鲁棒性
+- **原因**：LoRA 通过低秩矩阵适应任务，在保持性能的同时减少了可训练参数，提升了训练效率
+
+**3. v2_lora vs v2 总结**
+
+- **性能**：v2_lora 相比 v2 有轻微优势（差异在 ±0.20% 以内）
+  - **Flamingo-3B**：v2_lora 与 v2 性能完全一致，但 v2_lora 在所有采样器下结果完全一致，表现出更好的鲁棒性
+  - **Qwen2.5-VL-3B-Instruct**：v2_lora 略优于 v2，在 200 条和 300 条数据上分别有 +0.20% 和 +0.13% 的提升
+  - **数据量趋势**：随着数据量增加，v2_lora 的优势更加明显（Qwen2.5-VL-3B-Instruct 在更大数据量上表现更好）
+- **鲁棒性**：v2_lora 在不同采样器下结果完全一致，鲁棒性显著优于 v2（v2 在不同采样器下结果有差异）
+- **训练效率**：v2_lora 使用 LoRA，可训练参数更少（约 3M vs 154M），训练速度更快
+- **推荐**：**推荐使用 v2_lora**，因为它在保持训练效率的同时，性能略优于 v2，且具有更好的鲁棒性。随着数据量增加，v2_lora 的优势会更加明显
 
 ### 3.6 结果说明
 

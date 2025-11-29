@@ -149,8 +149,14 @@ run_inference() {
     # 根据版本选择不同的配置文件（与训练脚本保持一致）
     local train_config="${lever_lm}"
     if [ "${version}" != "v0" ]; then
-        # v1, v2, v3 使用对应的配置文件
-        train_config="${lever_lm}_${version}"
+        # 如果版本包含 _lora，使用对应的 LoRA 配置文件
+        if [[ "${version}" == *"_lora" ]]; then
+            # LoRA 配置文件格式：query_img_text_icd_img_text_lever_lm_lora
+            train_config="${lever_lm}_lever_lm_lora"
+        else
+            # v1, v2, v3 使用对应的配置文件
+            train_config="${lever_lm}_${version}"
+        fi
     fi
     
     # 将 GPU 编号转换为 device 格式（cuda:0, cuda:1 等）
