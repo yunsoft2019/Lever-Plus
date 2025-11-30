@@ -11,7 +11,7 @@ defaults:
 
 # generation args:
 topk: 5
-few_shot_num: 4
+few_shot_num: 2
 batch_size: 32
 device: "cuda"
 precision: bf16

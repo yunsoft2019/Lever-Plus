@@ -12,7 +12,7 @@ defaults:
 
 # generation args:
 beam_size: 5
-few_shot_num: 2
+few_shot_num: 1
 batch_size: 32
 device: "cuda"
 precision: bf16
@@ -28,10 +28,6 @@ gpu_ids: [0]
 # load several models at the same time will cost large memory.
 # use sleep to load one by one.
 sleep_time: 90
-
-# LoRA configuration
-use_lora: false  # 是否使用LoRA解冻CLIP，默认为false
-lora_checkpoint_path: null  # LoRA checkpoint 路径，例如: "results/okvqa/model_cpk/v3_lora/checkpoint.pt"
 
 log_level: "INFO"
 

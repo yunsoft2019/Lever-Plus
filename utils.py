@@ -169,11 +169,15 @@ def get_info_score(
         )
         sub_info_score = new_cond_prob - cond_prob
         
-        # 统一计分方式：对于Qwen模型，将负数分数转换为正数（取绝对值）
-        # 这样可以与Flamingo的计分方式保持一致，都使用正数分数
-        if isinstance(interface, Qwen2VLInterface):
-            # Qwen的分数通常是接近0的负数，取绝对值使其与Flamingo的分数范围一致
-            sub_info_score = torch.abs(sub_info_score)
+        # 注意：Qwen和Flamingo的计算方式完全相同，但结果符号不同
+        # 这是因为模型行为不同：
+        # - Flamingo：添加ICD后损失减少，new_cond_prob > cond_prob，分数为正数
+        # - Qwen：添加ICD后损失增加，new_cond_prob < cond_prob，分数为负数
+        # 
+        # 对于Qwen的负数分数：
+        # - 束搜索时，使用 topk(k, largest=False) 选择最小的k个（即绝对值最小的，最接近0的）
+        # - 这样会选择 Beam 1（-9.29e-08），这是正确的
+        # - 不需要转换分数，保持原始负数分数即可
         
         info_score_list.append(sub_info_score)
         
