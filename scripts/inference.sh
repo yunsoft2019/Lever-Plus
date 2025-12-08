@@ -80,62 +80,84 @@ esac
 
 # 构建检查点目录和文件名模式
 # 添加版本目录支持：v0, v1, v2, v3...
-checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
+# v3 使用采样器特定的目录（如 v3_RandSampler）
+if [ "${version}" == "v3" ]; then
+    checkpoint_dir="./results/${dataset_name}/model_cpk/v3_${sampler_name}"
+else
+    checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
+fi
 # 将模型名称中的特殊字符替换为下划线，用于文件名匹配（与训练脚本一致）
 model_name_safe=$(echo "$model_name" | sed 's/-/_/g' | sed 's/\./_/g')
 checkpoint_filename_pattern="${model_name_safe}_${sampler_name}_infoscore_left_beam5_shot2_cand64_sample${sample_num}"
 
 # v3 使用 .pt 格式的 checkpoint（GRPO checkpoint）
 if [ "${version}" == "v3" ]; then
-    # v3 checkpoint 格式：grpo_epoch*.pt（优先使用最新的 grpo checkpoint）
-    echo "查找 v3 GRPO checkpoint (.pt 文件)..."
+    # v3 checkpoint 格式：优先使用 v2format.ckpt（通过 v2 推理流程），其次是 grpo_epoch*.pt
+    echo "查找 v3 GRPO checkpoint..."
+    echo "查找目录: ${checkpoint_dir}"
     
-    # 1. 优先查找最新的 grpo_epoch*.pt 文件
-    grpo_files=($(ls -t "${checkpoint_dir}"/grpo_epoch*.pt 2>/dev/null))
-    
-    # 2. 如果没找到 grpo，查找 rce_epoch*.pt 文件
-    if [ ${#grpo_files[@]} -eq 0 ]; then
-        echo "未找到 grpo checkpoint，尝试查找 rce checkpoint..."
-        rce_files=($(ls -t "${checkpoint_dir}"/rce_epoch*.pt 2>/dev/null))
-        if [ ${#rce_files[@]} -gt 0 ]; then
-            grpo_files=("${rce_files[@]}")
-        fi
-    fi
-    
-    # 3. 如果还是没找到，查找所有 .pt 文件
-    if [ ${#grpo_files[@]} -eq 0 ]; then
-        echo "未找到 grpo/rce checkpoint，查找所有 .pt 文件..."
-        grpo_files=($(ls -t "${checkpoint_dir}"/*.pt 2>/dev/null))
-    fi
-    
-    # 4. 跨数据集查找
-    if [ ${#grpo_files[@]} -eq 0 ]; then
-        echo "在当前数据集目录未找到 checkpoint，尝试在所有数据集目录的 v3 目录中搜索..."
-        for dir in ./results/*/model_cpk/v3; do
-            if [ -d "$dir" ]; then
-                found_files=($(ls -t "$dir"/grpo_epoch*.pt 2>/dev/null))
-                if [ ${#found_files[@]} -gt 0 ]; then
-                    grpo_files+=("${found_files[@]}")
-                    echo "  在 $dir 中找到 ${#found_files[@]} 个 grpo checkpoint"
-                fi
-            fi
-        done
-    fi
-    
-    # 使用最新的 checkpoint
-    if [ ${#grpo_files[@]} -gt 0 ]; then
-        ckpt_path=$(ls -t "${grpo_files[@]}" 2>/dev/null | head -1)
+    # 0. 优先查找 v2format.ckpt 文件（推荐，使用 v2 推理流程）
+    v2format_files=($(ls -t "${checkpoint_dir}"/*_v2format.ckpt 2>/dev/null))
+    if [ ${#v2format_files[@]} -gt 0 ]; then
+        ckpt_path="${v2format_files[0]}"
         ckpt_filename=$(basename "$ckpt_path")
-        echo "✓ 找到 v3 checkpoint: ${ckpt_filename}"
+        echo "✓ 找到 v3 v2format checkpoint: ${ckpt_filename}"
         echo "  检查点路径: ${ckpt_path}"
         export LEVER_LM_CHECKPOINT_PATH="${ckpt_path}"
-        export LEVER_LM_CHECKPOINT_VERSION="v3"  # 标记这是 v3 checkpoint
-    else
-        echo "警告: 未找到 v3 checkpoint (.pt 文件)"
-        echo "查找目录: ${checkpoint_dir}"
-        echo "查找模式: grpo_epoch*.pt 或 rce_epoch*.pt"
-        unset LEVER_LM_CHECKPOINT_PATH
+        # 使用 v2 推理流程（不设置 v3 标记）
         unset LEVER_LM_CHECKPOINT_VERSION
+    else
+        echo "未找到 v2format checkpoint，查找原始 .pt 文件..."
+    fi
+    
+    # 1. 如果没有 v2format，查找最新的 grpo_epoch*.pt 文件
+    if [ -z "$ckpt_path" ]; then
+        grpo_files=($(ls -t "${checkpoint_dir}"/grpo_epoch*.pt 2>/dev/null))
+    
+        # 2. 如果没找到 grpo，查找 rce_epoch*.pt 文件
+        if [ ${#grpo_files[@]} -eq 0 ]; then
+            echo "未找到 grpo checkpoint，尝试查找 rce checkpoint..."
+            rce_files=($(ls -t "${checkpoint_dir}"/rce_epoch*.pt 2>/dev/null))
+            if [ ${#rce_files[@]} -gt 0 ]; then
+                grpo_files=("${rce_files[@]}")
+            fi
+        fi
+        
+        # 3. 如果还是没找到，查找所有 .pt 文件
+        if [ ${#grpo_files[@]} -eq 0 ]; then
+            echo "未找到 grpo/rce checkpoint，查找所有 .pt 文件..."
+            grpo_files=($(ls -t "${checkpoint_dir}"/*.pt 2>/dev/null))
+        fi
+        
+        # 4. 跨数据集查找
+        if [ ${#grpo_files[@]} -eq 0 ]; then
+            echo "在当前数据集目录未找到 checkpoint，尝试在所有数据集目录的 v3 目录中搜索..."
+            for dir in ./results/*/model_cpk/v3_${sampler_name}; do
+                if [ -d "$dir" ]; then
+                    found_files=($(ls -t "$dir"/grpo_epoch*.pt 2>/dev/null))
+                    if [ ${#found_files[@]} -gt 0 ]; then
+                        grpo_files+=("${found_files[@]}")
+                        echo "  在 $dir 中找到 ${#found_files[@]} 个 grpo checkpoint"
+                    fi
+                fi
+            done
+        fi
+        
+        # 使用最新的 checkpoint
+        if [ ${#grpo_files[@]} -gt 0 ]; then
+            ckpt_path=$(ls -t "${grpo_files[@]}" 2>/dev/null | head -1)
+            ckpt_filename=$(basename "$ckpt_path")
+            echo "✓ 找到 v3 checkpoint: ${ckpt_filename}"
+            echo "  检查点路径: ${ckpt_path}"
+            export LEVER_LM_CHECKPOINT_PATH="${ckpt_path}"
+            export LEVER_LM_CHECKPOINT_VERSION="v3"  # 标记这是 v3 checkpoint
+        else
+            echo "警告: 未找到 v3 checkpoint (.pt 文件)"
+            echo "查找目录: ${checkpoint_dir}"
+            echo "查找模式: *_v2format.ckpt 或 grpo_epoch*.pt 或 rce_epoch*.pt"
+            unset LEVER_LM_CHECKPOINT_PATH
+            unset LEVER_LM_CHECKPOINT_VERSION
+        fi
     fi
 else
     # v0, v1, v2, v2_lora 使用 .ckpt 格式的 checkpoint
