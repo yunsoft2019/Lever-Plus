@@ -170,24 +170,8 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2_lora
 
 # v3版本训练（V2 + 离线强化学习，GRPO训练）
-# 注意：v3训练前需要先完成以下步骤：
-#   1. 训练 v2 模型（作为 SFT checkpoint）
-#   2. 导出 embeddings: bash scripts/export_embeddings.sh
-#   3. 生成 RL 数据: bash scripts/generate_rl_data.sh
-bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
-
-# v3 训练参数可通过环境变量自定义（可选）：
-# 默认参数（当前配置，可能不是最优）：
-# export RCE_EPOCHS=25 GRPO_EPOCHS=25 BATCH_SIZE=1
-# export RCE_LR=5e-4 GRPO_LR=5e-6 KL_BETA=0.3
-# export REWARD_ALPHA=0.2 REWARD_BETA=1.0
-# bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
-
-# 优化后的参数（推荐，参见 GRPO训练优化建议.md）：
-# export RCE_EPOCHS=3 GRPO_EPOCHS=8 BATCH_SIZE=4
-# export RCE_LR=1e-5 GRPO_LR=1e-5 KL_BETA=0.1
-# export REWARD_ALPHA=0.5 REWARD_BETA=0.8
-# bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+# 推荐使用统一的 train_v3.sh 脚本（自动处理 embeddings 导出和 RL 数据生成）
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 生成的束搜索数据训练
@@ -215,51 +199,11 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2_lora
 
 # v3版本训练（V2 + 离线强化学习，GRPO训练）
-# 注意：v3支持四种采样器，需要为每种采样器分别训练
-# 
-# 训练前准备（只需要执行一次）：
-#   1. 训练 v2 模型（作为 SFT checkpoint，每种采样器都需要）
-#   2. 导出 embeddings（通用，所有采样器共享）:
-#      bash scripts/export_embeddings.sh
-#
-# 为每种采样器生成 RL 数据（采样器特定，需要分别生成）:
-#   bash scripts/generate_rl_data_for_sampler.sh rand_sampler qwen2.5_vl_3B okvqa_local cuda:0
-#   bash scripts/generate_rl_data_for_sampler.sh text_sim_sampler qwen2.5_vl_3B okvqa_local cuda:2
-#   bash scripts/generate_rl_data_for_sampler.sh img_sim_sampler qwen2.5_vl_3B okvqa_local cuda:3
-#   bash scripts/generate_rl_data_for_sampler.sh mix_sampler qwen2.5_vl_3B okvqa_local cuda:4
-#
-# 训练 v3 模型（每种采样器分别训练）:
-# 
-# 方法1: 使用优化后的参数（推荐，参见 GRPO训练优化建议.md）
-# 优化参数: RCE_EPOCHS=3, GRPO_EPOCHS=8, BATCH_SIZE=4, RCE_LR=1e-5, GRPO_LR=1e-5, KL_BETA=0.1, REWARD_ALPHA=0.5, REWARD_BETA=0.8
-
-# RandSampler（使用优化参数）
-bash scripts/train_v3_optimized.sh 1 rand_sampler
-
-# TextSimSampler（使用优化参数）
-bash scripts/train_v3_optimized.sh 2 text_sim_sampler
-
-# ImgSimSampler（使用优化参数）
-bash scripts/train_v3_optimized.sh 3 img_sim_sampler
-
-# MixSampler（使用优化参数）
-bash scripts/train_v3_optimized.sh 4 mix_sampler
-
-# 方法2: 使用默认参数（不推荐，可能导致过拟合）
-# RandSampler
-# bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
-
-# TextSimSampler
-# bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B v3
-
-# ImgSimSampler
-# bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B v3
-
-# MixSampler
-# bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B v3
-
-# v4版本训练（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
-bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4
+# 推荐使用统一的 train_v3.sh 脚本（自动处理 embeddings 导出和 RL 数据生成）
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+bash scripts/train_v3.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B
+bash scripts/train_v3.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B
+bash scripts/train_v3.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B
 ```
 
 #### LoRA 训练说明
@@ -285,266 +229,85 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 
 V3 在 V2 基础上新增离线强化学习阶段，通过 RCE 预热 + GRPO 后训练，利用束搜索的多条 beam 及分数进一步优化。
 
-**新RL数据格式说明**（包含 beam、温度采样、随机组合和 correctness）：
-```json
-{
-  "query_id": {
-    "pointer_candidates": [
-      {
-        "pointer": [7, 22],
-        "gen_method": "beam",
-        "beam_rank": 0,
-        "beam_score": 2.13,
-        "logprob_score": -1.56,
-        "temperature": null,
-        "vqa_pred_answer": "a book",
-        "vqa_correct": 1,
-        "vqa_acc_score": 1.0
-      },
-      {
-        "pointer": [5, 18],
-        "gen_method": "sample",
-        "beam_rank": null,
-        "beam_score": null,
-        "logprob_score": -2.03,
-        "temperature": 1.0,
-        "vqa_pred_answer": "a notebook",
-        "vqa_correct": 1,
-        "vqa_acc_score": 0.9
-      }
-    ]
-  }
-}
-```
+**🎉 最新结果（v3_1layer，200条数据）**：
+| Shot Num | v2 基线 | v3_1layer | 提升 |
+|----------|---------|-----------|------|
+| 1 | 56.7% | **59.3%** | **+2.6%** |
+| 2 | 56.1% | **57.1%** | **+1.0%** |
 
-**Step 0: 导出 Embeddings**
+**一键训练（推荐）**：
 
-在生成 RL 数据之前，需要先导出 query 和 candidate embeddings，以加速后续的 RL 数据生成过程。
-
-**重要说明**：
-- **Embeddings 是通用的**：`query_embeddings.pt` 和 `candidate_embeddings.pt` 不依赖于采样器，因为它们只是对训练集中所有样本的编码
-- **只需要生成一次**：所有采样器（RandSampler, TextSimSampler, ImgSimSampler, MixSampler）都可以使用同一份 embeddings
-- **RL 数据是采样器特定的**：每个采样器需要单独生成对应的 RL 数据，因为不同采样器会选择不同的候选池
+使用统一的 `train_v3.sh` 脚本，参数格式与 `train_lever_lm.sh` 一致：
 
 ```bash
-# 基本用法（使用默认参数）
-bash scripts/export_embeddings.sh
+# 参数格式: task dataset gpu_id lever_lm sampler beam_model
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+```
 
-# 完整参数用法
-bash scripts/export_embeddings.sh \
-    results/okvqa/model_cpk/v2/Qwen2_5_VL_3B_Instruct_RandSampler_infoscore_left_beam5_shot2_cand64_sample800_epoch=19_train=24.18280_val=21.98483.ckpt \
-    okvqa_local \
-    results/okvqa/cache \
-    cuda:0
+该脚本会自动执行完整的 v3 训练流程：
+1. **Step 0**: 导出 Embeddings（如果不存在）
+2. **Step 1**: 生成 RL 数据（如果不存在）
+3. **Step 2**: 执行 GRPO 强化学习训练
 
-# 如果 checkpoint 中没有配置信息，可以指定 train_config
+**训练参数自定义**（通过环境变量）：
+
+```bash
+# 使用默认参数（推荐）
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+
+# 自定义训练参数
+export RCE_EPOCHS=5 GRPO_EPOCHS=10 BATCH_SIZE=1
+export RCE_LR=1e-4 GRPO_LR=1e-5 KL_BETA=0.1 NUM_LAYERS=1
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+```
+
+**分步执行（高级用法）**：
+
+如果需要单独执行某个步骤，可以使用以下脚本：
+
+```bash
+# Step 0: 导出 Embeddings（通用，只需执行一次）
 bash scripts/export_embeddings.sh \
     results/okvqa/model_cpk/v2/xxx.ckpt \
     okvqa_local \
     results/okvqa/cache \
-    cuda:0 \
-    configs/train/lever_lm/v2/query_img_text_icd_img_text_lever_lm.yaml
-```
+    cuda:0
 
-**输出文件**：
-- `results/okvqa/cache/query_embeddings.pt` - Query embeddings（通用，所有采样器共享）
-- `results/okvqa/cache/candidate_embeddings.pt` - Candidate embeddings（通用，所有采样器共享）
-
-**Step 1: 生成束搜索数据（用于RL数据生成）**
-```bash
-# 四种采样器都需要重新生成（用于后续RL数据生成）
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
-bash scripts/generate_data.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
-bash scripts/generate_data.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
-bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
-```
-
-**Step 2: 生成 RL 数据（包含 beam、温度采样、随机组合和 correctness）**
-
-使用 `generate_rl_data_for_sampler.sh` 脚本（推荐）或 `generate_rl_data.sh` 脚本生成 RL 数据，该脚本会：
-1. 从束搜索数据中提取 beam 序列
-2. 使用温度采样生成额外的候选序列
-3. 添加随机组合的候选序列
-4. 对每个候选序列调用 VQA 模型计算 correctness
-
-**重要说明**：
-- **RL 数据是采样器特定的**：每个采样器需要单独生成对应的 RL 数据，因为不同采样器会选择不同的候选池
-- **Embeddings 是通用的**：所有采样器使用相同的 `query_embeddings.pt` 和 `candidate_embeddings.pt`（Step 0 生成）
-
-**推荐方式：使用便捷脚本（自动查找文件）**
-
-```bash
-# 为 RandSampler 生成 RL 数据
+# Step 1: 生成 RL 数据（每个采样器需要单独生成）
 bash scripts/generate_rl_data_for_sampler.sh rand_sampler qwen2.5_vl_3B okvqa_local cuda:0
 
-# 为 TextSimSampler 生成 RL 数据
-bash scripts/generate_rl_data_for_sampler.sh text_sim_sampler qwen2.5_vl_3B okvqa_local cuda:2
-
-# 为 ImgSimSampler 生成 RL 数据
-bash scripts/generate_rl_data_for_sampler.sh img_sim_sampler qwen2.5_vl_3B okvqa_local cuda:3
-
-# 为 MixSampler 生成 RL 数据
-bash scripts/generate_rl_data_for_sampler.sh mix_sampler qwen2.5_vl_3B okvqa_local cuda:4
-```
-
-**手动方式：使用完整参数**
-
-```bash
-# RandSampler 示例
-bash scripts/generate_rl_data.sh \
-    results/okvqa/model_cpk/v2/Qwen2_5_VL_3B_Instruct_RandSampler_infoscore_left_beam5_shot2_cand64_sample800_epoch=19_train=24.18280_val=21.98483.ckpt \
-    results/okvqa/generated_data/vqa-okvqa-Qwen2_5-VL-3B-Instruct-RandSampler-scorer:infoscore-construct_order:left-beam_size:5-max_shot:2-candidate_num:64-sample_num:800.json \
-    results/okvqa/generated_data/rl_data_RandSampler.json \
-    results/okvqa/cache/query_embeddings.pt \
-    results/okvqa/cache/candidate_embeddings.pt \
-    cuda:7 \
-    qwen2.5_vl_3B \
-    okvqa_local
-
-# TextSimSampler（注意：beam_data 和 output_path 需要对应 TextSimSampler）
-bash scripts/generate_rl_data.sh \
-    results/okvqa/model_cpk/v2/Qwen2_5_VL_3B_Instruct_TextSimSampler_xxx.ckpt \
-    results/okvqa/generated_data/vqa-okvqa-Qwen2_5-VL-3B-Instruct-TextSimSampler-scorer:infoscore-construct_order:left-beam_size:5-max_shot:2-candidate_num:64-sample_num:800.json \
-    results/okvqa/generated_data/rl_data_TextSimSampler.json \
-    results/okvqa/cache/query_embeddings.pt \
-    results/okvqa/cache/candidate_embeddings.pt \
-    cuda:7 \
-    qwen2.5_vl_3B \
-    okvqa_local
-```
-
-**参数说明**：
-- `sft_ckpt`: SFT 模型（v2）checkpoint 路径
-- `beam_data`: 束搜索数据 JSON 路径（Step 1 生成）
-- `output_path`: 输出 RL 数据 JSON 路径
-- `query_emb`: Query embeddings 路径（Step 0 生成）
-- `cand_emb`: Candidate embeddings 路径（Step 0 生成）
-- `device`: GPU 设备（如 cuda:0, cuda:7）
-- `vqa_model`: VQA 模型名称（默认: qwen2.5_vl_3B）
-- `dataset`: 数据集名称（默认: okvqa_local）
-
-**输出文件**：
-- `results/okvqa/generated_data/rl_data_{Sampler}.json` - 包含所有候选序列和 correctness 的 RL 数据
-
-**Step 3: GRPO Post-Training（使用新RL数据格式）**
-```bash
-# 对每种采样器的数据进行预处理
-python -c "
-import json
-import numpy as np
-
-for sampler in ['RandSampler', 'TextSimSampler', 'ImgSimSampler', 'MixSampler']:
-    input_path = f'results/okvqa/generated_data/vqa-okvqa-flamingo_3B-{sampler}-scorer:infoscore-construct_order:left-beam_size:5-few_shot:2-candidate_num:64-sample_num:800.json'
-    output_path = f'results/okvqa/generated_data/beam_{sampler}_linear01.json'
-    
-    with open(input_path, 'r') as f:
-        data = json.load(f)
-    
-    improved_data = {}
-    for qid, item in data.items():
-        scores = np.array(item['score_list'])
-        if scores.max() != scores.min():
-            normalized = (scores - scores.min()) / (scores.max() - scores.min())
-            improved = 0.1 + 0.9 * normalized
-        else:
-            improved = np.ones_like(scores)
-        improved_data[qid] = {
-            'id_list': item['id_list'], 
-            'score_list': improved.tolist(),
-            'shot_scores': item.get('shot_scores', [])  # 保留shot_scores
-        }
-    
-    with open(output_path, 'w') as f:
-        json.dump(improved_data, f)
-    print(f'预处理完成: {output_path}')
-"
-```
-
-**Step 3: GRPO Post-Training（使用新RL数据格式）**
-
-使用新生成的 RL 数据进行 GRPO 训练：
-
-```bash
-# RandSampler（使用新RL数据格式，batch_size=1）
+# Step 2: GRPO 训练
 CUDA_VISIBLE_DEVICES=0 python -m lever_lm.workflows.grpo_post_train \
     --beam_data "results/okvqa/generated_data/rl_data_RandSampler.json" \
     --img_emb "results/okvqa/cache/query_embeddings.pt" \
-    --output_dir "results/okvqa/model_cpk/v3_RandSampler" \
-    --rce_epochs 25 \
-    --grpo_epochs 25 \
-    --batch_size 1 \
-    --rce_lr 5e-4 \
-    --grpo_lr 5e-6 \
-    --kl_beta 0.3 \
-    --reward_alpha 0.2 \
-    --reward_beta 1.0 \
+    --sft_ckpt "results/okvqa/model_cpk/v2/xxx.ckpt" \
+    --output_dir "results/okvqa/model_cpk/v3_1layer" \
+    --rce_epochs 5 --grpo_epochs 10 --batch_size 1 \
+    --rce_lr 1e-4 --grpo_lr 1e-5 --kl_beta 0.1 --num_layers 1 \
     --device cuda:0
-
-# TextSimSampler
-CUDA_VISIBLE_DEVICES=1 python -m lever_lm.workflows.grpo_post_train \
-    --beam_data "results/okvqa/generated_data/rl_data_TextSimSampler.json" \
-    --img_emb "results/okvqa/cache/query_embeddings.pt" \
-    --output_dir "results/okvqa/model_cpk/v3_TextSimSampler" \
-    --rce_epochs 25 --grpo_epochs 25 --batch_size 1 \
-    --rce_lr 5e-4 --grpo_lr 5e-6 --kl_beta 0.3 \
-    --reward_alpha 0.2 --reward_beta 1.0 --device cuda:0
-
-# ImgSimSampler
-CUDA_VISIBLE_DEVICES=2 python -m lever_lm.workflows.grpo_post_train \
-    --beam_data "results/okvqa/generated_data/rl_data_ImgSimSampler.json" \
-    --img_emb "results/okvqa/cache/query_embeddings.pt" \
-    --output_dir "results/okvqa/model_cpk/v3_ImgSimSampler" \
-    --rce_epochs 25 --grpo_epochs 25 --batch_size 1 \
-    --rce_lr 5e-4 --grpo_lr 5e-6 --kl_beta 0.3 \
-    --reward_alpha 0.2 --reward_beta 1.0 --device cuda:0
-
-# MixSampler
-CUDA_VISIBLE_DEVICES=3 python -m lever_lm.workflows.grpo_post_train \
-    --beam_data "results/okvqa/generated_data/rl_data_MixSampler.json" \
-    --img_emb "results/okvqa/cache/query_embeddings.pt" \
-    --output_dir "results/okvqa/model_cpk/v3_MixSampler" \
-    --rce_epochs 25 --grpo_epochs 25 --batch_size 1 \
-    --rce_lr 5e-4 --grpo_lr 5e-6 --kl_beta 0.3 \
-    --reward_alpha 0.2 --reward_beta 1.0 --device cuda:0
 ```
 
-**注意**：
-- 新 RL 数据格式要求 `batch_size=1`（每个 batch 对应一个 query-group）
-- `--img_emb` 参数应指向 `query_embeddings.pt`（而非旧的 `ImgFeatures.pth`）
-- `--reward_alpha` 和 `--reward_beta` 用于控制 reward 权重（beam_score 和 correctness）
+**推理（使用 v2 推理流程）**：
 
-**Step 4: 评估V3模型**
 ```bash
-export OKVQA_PATH="datasets/okvqa"
-export COCO_PATH="datasets/mscoco"
+# 先转换为 v2 格式
+python scripts/convert_v3_to_v2_format.py --v3_ckpt results/okvqa/model_cpk/v3_1layer/grpo_epoch10.pt
 
-# 评估（使用V2的CLIP+LoRA进行embedding生成）
-CUDA_VISIBLE_DEVICES=0 python scripts/eval_v3_with_v2_clip.py \
-    --v2_ckpt "results/okvqa/model_cpk/v2_lora/xxx.ckpt" \
-    --v3_ckpt "results/okvqa/model_cpk/v3_ImgSimSampler/grpo_epoch25.pt" \
-    --dataset okvqa \
-    --shot_num 1 \
-    --test_num 500 \
-    --device cuda:0
+# 使用 v2 推理流程
+export LEVER_LM_CHECKPOINT_PATH="results/okvqa/model_cpk/v3_1layer/grpo_epoch10_v2format.ckpt"
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
 ```
 
 **GRPO 超参数说明**：
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--rce_epochs` | 25 | RCE预热轮数 |
-| `--grpo_epochs` | 25 | GRPO强化学习轮数 |
-| `--rce_lr` | 5e-4 | RCE学习率 |
-| `--grpo_lr` | 5e-6 | GRPO学习率（越小越稳定） |
-| `--kl_beta` | 0.3 | KL散度权重（越大策略变化越保守） |
-| `--batch_size` | 32 | 批次大小 |
-
-**V3 vs V2 性能对比**（OKVQA，500样本）：
-| Sampler | V2 | V3 (GRPO) | 提升 |
-|---------|-----|-----------|------|
-| RandSampler | 50.56% | 50.08% | -0.48% |
-| TextSimSampler | 50.56% | 51.04% | +0.48% |
-| ImgSimSampler | 50.56% | 51.16% | +0.60% |
-| MixSampler | 50.56% | 51.24% | +0.68% |
+| `--rce_epochs` | 5 | RCE预热轮数 |
+| `--grpo_epochs` | 10 | GRPO强化学习轮数 |
+| `--rce_lr` | 1e-4 | RCE学习率 |
+| `--grpo_lr` | 1e-5 | GRPO学习率 |
+| `--kl_beta` | 0.1 | KL散度权重 |
+| `--num_layers` | 1 | Cross-Attention层数（与v2一致） |
+| `--batch_size` | 1 | 批次大小 |
 
 ### 2.4 基线
 
