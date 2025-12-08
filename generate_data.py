@@ -4,6 +4,11 @@ import sys
 from time import sleep
 from typing import Dict
 
+# 确保根目录在sys.path最前面，以正确导入根目录的utils.py
+_root_dir = os.path.dirname(os.path.abspath(__file__))
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+
 import hydra
 import torch
 from datasets import Dataset
@@ -16,7 +21,15 @@ from tqdm import tqdm
 from lever_lm.utils import beam_filter, init_interface
 from open_mmicl.interface import BaseInterface
 from open_mmicl.interface.qwen2vl_interface import Qwen2VLInterface
-from utils import get_cider_score, get_info_score, load_ds
+
+# 从根目录的utils.py导入（不是lever_lm/utils）
+import importlib.util
+_utils_spec = importlib.util.spec_from_file_location("root_utils", os.path.join(_root_dir, "utils.py"))
+_root_utils = importlib.util.module_from_spec(_utils_spec)
+_utils_spec.loader.exec_module(_root_utils)
+get_cider_score = _root_utils.get_cider_score
+get_info_score = _root_utils.get_info_score
+load_ds = _root_utils.load_ds
 
 
 @torch.inference_mode()
@@ -30,10 +43,15 @@ def generate_single_sample_icd(
     # 构建candidate set
     candidateidx2data = {data["idx"]: data for data in candidate_set}
     test_data_id_list = [[test_data_id]]
+    
+    # 【V3新增】保存每个beam每个shot的分数历史
+    # shot_scores_dict: {tuple(beam_seq): [shot1_score, shot2_score, ...]}
+    shot_scores_dict = {(test_data_id,): []}
 
-    for _ in range(cfg.few_shot_num):
+    for shot_idx in range(cfg.few_shot_num):
         new_test_data_id_list = []
         new_test_score_list = []
+        new_shot_scores_dict = {}
         for test_data_id_seq in test_data_id_list:
             # 避免添加重复的结果 将已经添加的进行过滤
             filtered_candidateidx2data = candidateidx2data.copy()
@@ -91,16 +109,66 @@ def generate_single_sample_icd(
             )
             topk_scores = topk_scores.tolist()
 
+            # 获取当前beam的历史分数
+            parent_key = tuple(test_data_id_seq)
+            parent_scores = shot_scores_dict.get(parent_key, [])
+
             for idx, score in zip(indices, topk_scores):
-                new_test_data_id_list.append([idx, *test_data_id_seq])
+                new_seq = [idx, *test_data_id_seq]
+                new_test_data_id_list.append(new_seq)
                 new_test_score_list.append(score)
+                
+                # 【V3新增】保存这个shot的分数到历史中
+                new_key = tuple(new_seq)
+                new_shot_scores_dict[new_key] = parent_scores + [score]
 
         new_test_score_list, new_test_data_id_list = beam_filter(
             new_test_score_list, new_test_data_id_list, cfg.beam_size
         )
         test_data_id_list = new_test_data_id_list
+        
+        # 【V3新增】只保留被选中的beam的分数历史
+        shot_scores_dict = {tuple(seq): new_shot_scores_dict[tuple(seq)] 
+                           for seq in test_data_id_list if tuple(seq) in new_shot_scores_dict}
+    
+    # 【V3新增】构建更清晰的数据结构，每个beam包含每个shot的id和分数
+    # beams格式: [
+    #   {
+    #     "shots": [{"id": shot1_id, "score": shot1_score}, {"id": shot2_id, "score": shot2_score}],
+    #     "final_score": beam的最终累积分数
+    #   },
+    #   ...
+    # ]
+    beams = []
+    for i, seq in enumerate(test_data_id_list):
+        shot_scores = shot_scores_dict.get(tuple(seq), [])
+        # seq格式是 [shot_n_id, shot_{n-1}_id, ..., shot1_id, test_id]
+        # 最后一个是test_id，前面是shot_ids（逆序）
+        shot_ids = seq[:-1]  # 去掉test_id，剩下的是shot_ids（从最新到最早）
+        shot_ids = shot_ids[::-1]  # 反转，变成从shot1到shot_n的顺序
+        
+        shots = []
+        for j, (shot_id, shot_score) in enumerate(zip(shot_ids, shot_scores)):
+            shots.append({
+                "id": shot_id,
+                "score": shot_score
+            })
+        
+        beams.append({
+            "shots": shots,
+            "final_score": new_test_score_list[i] if i < len(new_test_score_list) else None,
+            "full_sequence": seq  # 保留原始序列以便兼容
+        })
+    
     return {
-        test_data_id: {"id_list": test_data_id_list, "score_list": new_test_score_list}
+        test_data_id: {
+            "beams": beams,
+            "few_shot_num": cfg.few_shot_num,  # 记录使用的shot数
+            # 保留旧字段以便兼容
+            "id_list": test_data_id_list,
+            "score_list": new_test_score_list,
+            "shot_scores": [shot_scores_dict.get(tuple(seq), []) for seq in test_data_id_list]
+        }
     }
 
 
@@ -241,10 +309,12 @@ def main(cfg: DictConfig):
     scorer_str = str(cfg.scorer).replace('\uf03a', ':').replace('：', ':')
     construct_order_str = str(cfg.construct_order).replace('\uf03a', ':').replace('：', ':')
     
+    # 文件名不再包含few_shot_num，因为shot_scores已经包含了所有shot的分数历史
+    # 例如当few_shot_num=2时，shot_scores会是[[shot1_score, shot2_score], ...]
     save_file_name = (
         f"{cfg.task.task_name}-{cfg.dataset.name}-"
         f"{model_name_safe}-{cfg.sampler.sampler_name}-scorer:{scorer_str}-construct_order:{construct_order_str}-"
-        f"beam_size:{cfg.beam_size}-few_shot:{cfg.few_shot_num}-"
+        f"beam_size:{cfg.beam_size}-max_shot:{cfg.few_shot_num}-"
         f"candidate_num:{cfg.sampler.candidate_num}-sample_num:{cfg.sample_num}.json"
     )
     

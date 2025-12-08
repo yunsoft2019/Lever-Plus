@@ -302,23 +302,6 @@ class Qwen2VLInterface(LVLMInterface):
                 # Add user content
                 message.append({"role": "user", "content": content})
                 all_messages.append(message)
-                # Log the first message for debugging (only once per session)
-                if len(all_messages) == 1 and not hasattr(self, '_logged_message_format'):
-                    logger.debug("=" * 80)
-                    logger.debug("Qwen2.5-VL Message Format (first sample):")
-                    logger.debug(f"Message structure: {message}")
-                    # Log system prompt if present
-                    if self.system_prompt:
-                        logger.debug(f"System prompt: {self.system_prompt[:200]}...")  # Show first 200 chars
-                    # Log content details
-                    logger.debug("User content items:")
-                    for i, item in enumerate(content):
-                        if item["type"] == "image":
-                            logger.debug(f"  Content[{i}]: type=image, image=<PIL.Image object>")
-                        else:
-                            logger.debug(f"  Content[{i}]: type=text, text={item['text'][:200]}...")  # Show first 200 chars
-                    logger.debug("=" * 80)
-                    self._logged_message_format = True
             else:
                 # Fallback: pure text
                 text_content = " ".join([item.strip() for item in sample if not self.is_img(item)])
@@ -329,14 +312,6 @@ class Qwen2VLInterface(LVLMInterface):
                 # Add user content
                 message.append({"role": "user", "content": text_content})
                 all_messages.append(message)
-                if len(all_messages) == 1 and not hasattr(self, '_logged_message_format'):
-                    logger.debug("=" * 80)
-                    logger.debug("Qwen2.5-VL Message Format (pure text, first sample):")
-                    logger.debug(f"Message: {message}")
-                    if self.system_prompt:
-                        logger.debug(f"System prompt: {self.system_prompt[:200]}...")
-                    logger.debug("=" * 80)
-                    self._logged_message_format = True
 
         # Process with Qwen2.5-VL processor using official method
         # Step 1: Apply chat template
@@ -350,30 +325,10 @@ class Qwen2VLInterface(LVLMInterface):
             )
             texts.append(text)
             
-            # Log the processed text for the first sample (only once per session)
-            if idx == 0 and not hasattr(self, '_logged_processed_text'):
-                logger.debug("=" * 80)
-                logger.debug("Qwen2.5-VL Processed Text (after apply_chat_template, first sample):")
-                logger.debug(f"Text length: {len(text)} characters")
-                logger.debug(f"Text preview (first 500 chars):\n{text[:500]}...")
-                logger.debug("=" * 80)
-                self._logged_processed_text = True
-            
             # Process vision info
             image_inputs, video_inputs = process_vision_info(messages)
             image_inputs_list.append(image_inputs)
             video_inputs_list.append(video_inputs)
-            
-            # Log vision info for the first sample (only once per session)
-            if idx == 0 and not hasattr(self, '_logged_vision_info'):
-                logger.debug("=" * 80)
-                logger.debug("Qwen2.5-VL Vision Info (first sample):")
-                logger.debug(f"Number of images: {len(image_inputs) if image_inputs else 0}")
-                logger.debug(f"Number of videos: {len(video_inputs) if video_inputs else 0}")
-                if image_inputs:
-                    logger.debug(f"Image shapes: {[img.size if hasattr(img, 'size') else type(img).__name__ for img in image_inputs]}")
-                logger.debug("=" * 80)
-                self._logged_vision_info = True
         
         # Step 2: Process with processor
         # Qwen2.5-VL: Process items one by one (sequential processing)
@@ -402,8 +357,6 @@ class Qwen2VLInterface(LVLMInterface):
                     # image_grid_thw shape is [num_images, 3]
                     num_images = inputs['image_grid_thw'].shape[0]
                     inputs['image_nums'] = torch.tensor([num_images], dtype=torch.long)
-                logger.debug(f"image_grid_thw shape after single batch: {inputs['image_grid_thw'].shape}")
-                logger.debug(f"image_nums: {inputs['image_nums']}")
         else:
             # Get max sequence length
             max_seq_len = max(inp["input_ids"].shape[1] for inp in batch_inputs)

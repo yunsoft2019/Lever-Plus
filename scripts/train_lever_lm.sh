@@ -77,7 +77,8 @@ esac
 
 # 构建数据文件名（使用 sampler_name 大驼峰格式）
 # 注意：只包含文件名，不包含路径，因为 train.py 会自己拼接路径
-data_file="${task}-${dataset_name}-${model_name}-${sampler_name}-scorer:infoscore-construct_order:left-beam_size:5-few_shot:2-candidate_num:64-sample_num:${sample_num}.json"
+# 注意：实际生成的文件使用 max_shot 而不是 few_shot
+data_file="${task}-${dataset_name}-${model_name}-${sampler_name}-scorer:infoscore-construct_order:left-beam_size:5-max_shot:2-candidate_num:64-sample_num:${sample_num}.json"
 
 # 数据文件完整路径（仅用于显示）
 data_file_path="./results/${dataset_name}/generated_data/${data_file}"
@@ -101,21 +102,146 @@ echo "  Sampler: ${sampler} → ${sampler_name}"
 echo "  Lever LM: ${lever_lm}"
 echo "  Sample Num: ${sample_num}"
 echo "  Version: ${version}"
+if [ "${version}" == "v3" ]; then
+    echo "  Training Type: GRPO Reinforcement Learning"
+    echo "  RL Data: results/${dataset_name}/generated_data/rl_data_${sampler_name}.json"
+    echo "  Query Embeddings: results/${dataset_name}/cache/query_embeddings.pt"
+else
+    echo "  Training Type: Supervised Fine-Tuning (SFT)"
+    echo "  Data file: ${data_file_path}"
+fi
 echo "=========================================="
-echo "Data file: ${data_file_path}"
-echo "Checkpoint will save to: ${checkpoint_dir}/${checkpoint_filename}_best.ckpt"
-echo "=========================================="
+if [ "${version}" != "v3" ]; then
+    echo "Checkpoint will save to: ${checkpoint_dir}/${checkpoint_filename}_best.ckpt"
+    echo "=========================================="
+fi
 
 run_train() {
     local data_file=$1
  
+    # v3 使用 GRPO 强化学习训练
+    if [ "${version}" == "v3" ]; then
+        echo "==========Begin: V3 GRPO Reinforcement Learning Training=========="
+        
+        # 构建 RL 数据路径
+        local rl_data_path="./results/${dataset_name}/generated_data/rl_data_${sampler_name}.json"
+        local query_emb_path="./results/${dataset_name}/cache/query_embeddings.pt"
+        local sft_ckpt_path="./results/${dataset_name}/model_cpk/v2/${checkpoint_filename}_best.ckpt"
+        
+        # 检查必要文件是否存在
+        if [ ! -f "$rl_data_path" ]; then
+            echo "错误: RL 数据文件不存在: $rl_data_path"
+            echo ""
+            echo "说明:"
+            echo "  - Embeddings (query_embeddings.pt 和 candidate_embeddings.pt) 是通用的，"
+            echo "    只需要生成一次，所有采样器都可以使用"
+            echo "  - RL 数据 (rl_data_${sampler_name}.json) 是采样器特定的，"
+            echo "    需要为每个采样器分别生成"
+            echo ""
+            echo "解决方案:"
+            echo "  1. 如果 embeddings 还未生成，先运行:"
+            echo "     bash scripts/export_embeddings.sh"
+            echo ""
+            echo "  2. 为当前采样器生成 RL 数据:"
+            echo "     bash scripts/generate_rl_data_for_sampler.sh ${sampler} ${beam_model} ${dataset} cuda:${gpu_id}"
+            echo ""
+            echo "  或者手动运行:"
+            echo "     bash scripts/generate_rl_data.sh <sft_ckpt> <beam_data> <output_path> <query_emb> <cand_emb> <device>"
+            exit 1
+        fi
+        
+        if [ ! -f "$query_emb_path" ]; then
+            echo "错误: Query embeddings 文件不存在: $query_emb_path"
+            echo ""
+            echo "说明: Embeddings 是通用的，只需要生成一次，所有采样器都可以使用"
+            echo ""
+            echo "解决方案:"
+            echo "  bash scripts/export_embeddings.sh"
+            exit 1
+        fi
+        
+        if [ ! -f "./results/${dataset_name}/cache/candidate_embeddings.pt" ]; then
+            echo "错误: Candidate embeddings 文件不存在: ./results/${dataset_name}/cache/candidate_embeddings.pt"
+            echo ""
+            echo "说明: Embeddings 是通用的，只需要生成一次，所有采样器都可以使用"
+            echo ""
+            echo "解决方案:"
+            echo "  bash scripts/export_embeddings.sh"
+            exit 1
+        fi
+        
+        if [ ! -f "$sft_ckpt_path" ]; then
+            echo "提示: 最佳 checkpoint 不存在: $sft_ckpt_path"
+            echo "正在查找其他可用的 v2 checkpoint..."
+            # 尝试查找任何 v2 checkpoint
+            local v2_dir="./results/${dataset_name}/model_cpk/v2"
+            if [ -d "$v2_dir" ]; then
+                # 查找最新的 checkpoint（按修改时间排序）
+                sft_ckpt_path=$(find "$v2_dir" -name "*${sampler_name}*.ckpt" -type f -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+                if [ -z "$sft_ckpt_path" ]; then
+                    echo "错误: 未找到 v2 checkpoint，请先训练 v2 模型"
+                    exit 1
+                fi
+                echo "✓ 找到可用的 checkpoint: $sft_ckpt_path"
+            else
+                echo "错误: v2 checkpoint 目录不存在，请先训练 v2 模型"
+                exit 1
+            fi
+        else
+            echo "✓ 使用最佳 checkpoint: $sft_ckpt_path"
+        fi
+        
+        # 设置默认 GRPO 参数（可通过环境变量覆盖）
+        local rce_epochs=${RCE_EPOCHS:-25}
+        local grpo_epochs=${GRPO_EPOCHS:-25}
+        local batch_size=${BATCH_SIZE:-1}
+        local rce_lr=${RCE_LR:-5e-4}
+        local grpo_lr=${GRPO_LR:-5e-6}
+        local kl_beta=${KL_BETA:-0.3}
+        local reward_alpha=${REWARD_ALPHA:-0.2}
+        local reward_beta=${REWARD_BETA:-1.0}
+        
+        echo "RL Data: $rl_data_path"
+        echo "Query Embeddings: $query_emb_path"
+        echo "SFT Checkpoint: $sft_ckpt_path"
+        echo "Output Directory: $checkpoint_dir"
+        echo "=========================================="
+        
+        # 调用 GRPO 训练
+        # 注意：使用 CUDA_VISIBLE_DEVICES 后，PyTorch 只能看到 cuda:0
+        # 所以 device 参数应该设置为 cuda:0
+        CUDA_VISIBLE_DEVICES=${gpu_id} python -m lever_lm.workflows.grpo_post_train \
+            --beam_data "$rl_data_path" \
+            --img_emb "$query_emb_path" \
+            --sft_ckpt "$sft_ckpt_path" \
+            --output_dir "$checkpoint_dir" \
+            --rce_epochs ${rce_epochs} \
+            --grpo_epochs ${grpo_epochs} \
+            --batch_size ${batch_size} \
+            --rce_lr ${rce_lr} \
+            --grpo_lr ${grpo_lr} \
+            --kl_beta ${kl_beta} \
+            --reward_alpha ${reward_alpha} \
+            --reward_beta ${reward_beta} \
+            --device cuda:0
+        
+        echo "==========End: V3 GRPO Training=========="
+        echo ""
+        echo "✓ 训练完成！Checkpoint 保存在: $checkpoint_dir"
+        echo "  - RCE checkpoints: rce_epoch1.pt ~ rce_epoch25.pt"
+        echo "  - GRPO checkpoints: grpo_epoch1.pt ~ grpo_epoch25.pt"
+        echo "  - 推荐使用: grpo_epoch25.pt（最终模型）"
+        return 0
+    fi
+    
+    # v0, v1, v2, v2_lora 使用 SFT 训练
     # 在 ex_name 中包含采样器和模型名称，避免不同配置互相覆盖
     local ex_name_prefix="main_${task}_${sampler_name}_${model_name_safe}"
     
     # 根据版本选择不同的配置文件
     local train_config="${lever_lm}"
     if [ "${version}" != "v0" ]; then
-        # v1, v2, v3 使用对应的配置文件
+        # v1, v2 使用对应的配置文件
         # 如果版本包含 _lora，使用对应的 LoRA 配置文件
         if [[ "${version}" == *"_lora" ]]; then
             # 提取基础版本号（如 v2_lora -> v2）

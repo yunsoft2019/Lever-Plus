@@ -1,4 +1,3 @@
 defaults:
   - lever_lm_ds: query_img_text_icd_img_text_ds
   - lever_lm: v3/query_img_text_icd_img_text_lever_lm
-

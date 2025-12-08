@@ -47,4 +47,4 @@ python generate_data.py beam_size=5 \
                         dataset=${dataset} \
                         sampler=${sampler} \
                         infer_model=${beam_model} \
-                        few_shot_num=1
+                        few_shot_num=2

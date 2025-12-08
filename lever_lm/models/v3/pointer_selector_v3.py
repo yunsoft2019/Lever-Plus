@@ -1,137 +1,84 @@
 """
-Pointer Selector V3: V2 + 离线强化学习（GRPO风格后训练）
+Pointer Selector V3: V2 + 离线强化学习（RCE预热 + GRPO后训练）
 
 特点：
-- 基础：继承V2的所有功能（多层 Cross-Attention）
-- 后训练：在V2有监督训练后进行GRPO风格后训练
-- 阶段1：RCE (Reward-weighted Cross-Entropy) 热身
-- 阶段2：GRPO-PPO (Group-Relative Policy Optimization with PPO-style clipping)
-- 数据：完全离线，直接使用束搜索的beam和score
-- 目标：进一步优化任务指标，最大化高分beam的概率
+- 继承V2的Bi-Encoder + Cross-Attention架构
+- 新增RCE（Reward-Conditioned Estimation）预热损失
+- 新增GRPO（Group-Relative Policy Optimization）策略梯度损失
+- 支持组内相对优势计算
+- 支持KL散度计算和自适应调整
+
+来自强化学习.md的核心算法：
+- RCE损失：L_RCE = Σ w_i * CE(π_new, labels_i)，其中 w_i = softmax(score_i / τ)
+- GRPO损失：L_GRPO = L_PPO + β * L_KL
+  - L_PPO = -E[min(r * A, clip(r, 1-ε, 1+ε) * A)]
+  - L_KL = E[r - 1 - log(r)]（近似KL散度）
 
 作者: Lever-Plus Team
-日期: 2025-10-29
-参考: yiyun.md V3 部分
+日期: 2025-12-02
+参考: 强化学习.md
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional, Dict, Any, List
-import os
-from collections import defaultdict
-import numpy as np
+from typing import Tuple, Optional, Dict
 
-# 导入V2作为基础
-from ..v2.pointer_selector_v2 import PointerSelectorV2, PointerSelectorV2Config
-
-
-class PointerSelectorV3Config:
-    """V3模型配置"""
-    
-    def __init__(
-        self,
-        d_model: int = 768,
-        K: int = 32,
-        shot_num: int = 6,
-        label_smoothing: float = 0.0,
-        dropout: float = 0.5,
-        hidden_dim: int = 256,
-        num_heads: int = 1,
-        attn_dropout: float = 0.1,
-        num_layers: int = 3,
-        # V3特有参数
-        enable_rce: bool = False,  # 是否启用RCE
-        enable_grpo: bool = False,  # 是否启用GRPO
-        rce_temperature: float = 1.0,  # RCE温度
-        ppo_epsilon: float = 0.2,  # PPO裁剪参数
-        advantage_clip: float = 5.0,  # 优势函数裁剪
-        kl_beta: float = 0.01,  # KL散度权重
-        reward_norm: str = 'zscore'  # 奖励归一化方式：'zscore' 或 'minmax'
-    ):
-        self.d_model = d_model
-        self.K = K
-        self.shot_num = shot_num
-        self.label_smoothing = label_smoothing
-        self.dropout = dropout
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.attn_dropout = attn_dropout
-        self.num_layers = num_layers
-        # V3特有
-        self.enable_rce = enable_rce
-        self.enable_grpo = enable_grpo
-        self.rce_temperature = rce_temperature
-        self.ppo_epsilon = ppo_epsilon
-        self.advantage_clip = advantage_clip
-        self.kl_beta = kl_beta
-        self.reward_norm = reward_norm
-
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            'd_model': self.d_model,
-            'K': self.K,
-            'shot_num': self.shot_num,
-            'label_smoothing': self.label_smoothing,
-            'dropout': self.dropout,
-            'hidden_dim': self.hidden_dim,
-            'num_heads': self.num_heads,
-            'attn_dropout': self.attn_dropout,
-            'num_layers': self.num_layers,
-            'enable_rce': self.enable_rce,
-            'enable_grpo': self.enable_grpo,
-            'rce_temperature': self.rce_temperature,
-            'ppo_epsilon': self.ppo_epsilon,
-            'advantage_clip': self.advantage_clip,
-            'kl_beta': self.kl_beta,
-            'reward_norm': self.reward_norm
-        }
+from ..v2.pointer_selector_v2 import PointerSelectorV2
 
 
 class PointerSelectorV3(PointerSelectorV2):
     """
-    V3 版本：V2 + 离线强化学习（GRPO）
+    V3 版本：V2 + 离线强化学习（RCE预热 + GRPO后训练）
     
-    继承V2的所有功能，增加：
-    1. RCE（Reward-weighted CE）热身
-    2. GRPO-PPO后训练
+    继承V2的Bi-Encoder + Cross-Attention架构，新增强化学习相关方法：
+    - compute_rce_loss(): RCE预热损失
+    - compute_grpo_loss(): GRPO策略梯度损失
+    - compute_advantage(): 组内相对优势计算
+    - compute_kl_divergence(): KL散度计算
+    
+    来自强化学习.md 2.1节的5个创新点：
+    1. 多层级奖励设计
+    2. 自适应温度调度
+    3. 组内相对优势（Group-Relative Advantage）
+    4. 课程学习策略
+    5. KL散度自适应调整
     """
     
     def __init__(
         self,
         d_model: int = 768,
         K: int = 32,
-        shot_num: int = 6,
-        label_smoothing: float = 0.0,
-        dropout: float = 0.5,
+        shot_num: int = 2,
+        label_smoothing: float = 0.1,
+        dropout: float = 0.1,
         hidden_dim: int = 256,
         num_heads: int = 1,
         attn_dropout: float = 0.1,
         num_layers: int = 3,
-        # V3特有参数
-        enable_rce: bool = False,
-        enable_grpo: bool = False,
-        rce_temperature: float = 1.0,
-        ppo_epsilon: float = 0.2,
-        advantage_clip: float = 5.0,
-        kl_beta: float = 0.01,
-        reward_norm: str = 'zscore'
+        # V3新增参数
+        clip_epsilon: float = 0.2,
+        kl_beta: float = 0.1,
+        advantage_clip: float = 5.0
     ):
         """
         初始化 V3 模型
         
         Args:
-            [V2的所有参数...]
-            enable_rce: 是否启用RCE加权
-            enable_grpo: 是否启用GRPO
-            rce_temperature: RCE温度参数
-            ppo_epsilon: PPO裁剪参数
-            advantage_clip: 优势函数裁剪范围
-            kl_beta: KL散度正则化权重
-            reward_norm: 奖励归一化方式
+            d_model: 输入 embedding 维度 (默认 768, CLIP ViT-L/14 输出)
+            K: 候选池大小 (默认 32)
+            shot_num: 需要选择的样本数量 (默认 2)
+            label_smoothing: 标签平滑系数 (默认 0.1)
+            dropout: dropout 比例 (默认 0.1)
+            hidden_dim: 输出维度 (默认 256)
+            num_heads: Cross-Attention 的头数 (默认 1)
+            attn_dropout: Attention 层的 dropout (默认 0.1)
+            num_layers: Cross-Attention 的层数 (默认 3，V2使用3层)
+            clip_epsilon: PPO裁剪参数ε (默认 0.2)
+            kl_beta: KL散度权重β (默认 0.1)
+            advantage_clip: 优势裁剪范围 (默认 5.0，即[-5, 5])
         """
-        # 调用V2的初始化
+        # 调用V2的初始化（不打印V2的信息）
         super().__init__(
             d_model=d_model,
             K=K,
@@ -144,25 +91,15 @@ class PointerSelectorV3(PointerSelectorV2):
             num_layers=num_layers
         )
         
-        # V3特有属性
-        self.enable_rce = enable_rce
-        self.enable_grpo = enable_grpo
-        self.rce_temperature = rce_temperature
-        self.ppo_epsilon = ppo_epsilon
-        self.advantage_clip = advantage_clip
+        # V3新增参数
+        self.clip_epsilon = clip_epsilon
         self.kl_beta = kl_beta
-        self.reward_norm = reward_norm
+        self.advantage_clip = advantage_clip
         
-        print(f"✓ PointerSelectorV3 初始化完成")
-        print(f"  - 继承基础: V2")
-        print(f"  - RCE启用: {enable_rce}")
-        print(f"  - GRPO启用: {enable_grpo}")
-        if enable_rce:
-            print(f"  - RCE温度: {rce_temperature}")
-        if enable_grpo:
-            print(f"  - PPO ε: {ppo_epsilon}")
-            print(f"  - Advantage clip: ±{advantage_clip}")
-            print(f"  - KL β: {kl_beta}")
+        print(f"✓ PointerSelectorV3 初始化完成（继承V2 + 强化学习）")
+        print(f"  - clip_epsilon (PPO裁剪): {clip_epsilon}")
+        print(f"  - kl_beta (KL权重): {kl_beta}")
+        print(f"  - advantage_clip: [-{advantage_clip}, {advantage_clip}]")
     
     def compute_log_probs(
         self,
@@ -171,316 +108,603 @@ class PointerSelectorV3(PointerSelectorV2):
         labels: torch.Tensor
     ) -> torch.Tensor:
         """
-        计算给定轨迹的log概率（用于GRPO）
+        计算给定标签序列的log概率
         
         Args:
-            query_emb: [B, d] query编码
-            cand_emb: [B, K, d] 候选编码
-            labels: [B, S] 轨迹（标签序列）
+            query_emb: [B, d] query embedding
+            cand_emb: [B, K, d] 候选 embedding
+            labels: [B, S] 标签序列
         
         Returns:
-            log_probs: [B] 每个轨迹的总log概率
+            log_probs: [B] 每个样本的log概率（所有步骤的和）
         """
-        batch_size = query_emb.shape[0]
-        device = query_emb.device
+        result = self.forward(query_emb, cand_emb, labels=labels, return_loss=False)
+        logits = result['logits']  # [B, S, K]
         
-        # 前向传播获取logits
-        output = self.forward(
-            query_emb=query_emb,
-            cand_emb=cand_emb,
-            labels=None,  # 推理模式
-            return_loss=False
-        )
+        batch_size, shot_num, K = logits.shape
         
-        logits = output['logits']  # [B, S, K]
+        # 计算每步的log softmax
+        log_probs_all = F.log_softmax(logits, dim=-1)  # [B, S, K]
         
-        # 计算每步的log概率
-        log_probs_per_step = F.log_softmax(logits, dim=-1)  # [B, S, K]
-        
-        # 收集每步的实际选择的log概率（保持梯度）
-        # 使用gather操作而不是循环+.item()
+        # 收集每步选择的log概率
+        # labels: [B, S] -> [B, S, 1]
         labels_expanded = labels.unsqueeze(-1)  # [B, S, 1]
-        chosen_log_probs = torch.gather(log_probs_per_step, dim=2, index=labels_expanded)  # [B, S, 1]
-        chosen_log_probs = chosen_log_probs.squeeze(-1)  # [B, S]
+        selected_log_probs = log_probs_all.gather(dim=-1, index=labels_expanded)  # [B, S, 1]
+        selected_log_probs = selected_log_probs.squeeze(-1)  # [B, S]
         
-        # 裁剪每步的log_prob，防止极端值（-10对应概率约4.5e-5）
-        chosen_log_probs = torch.clamp(chosen_log_probs, min=-10.0, max=0.0)
+        # 对所有步骤求和得到序列的log概率
+        seq_log_probs = selected_log_probs.sum(dim=-1)  # [B]
         
-        # 对每个轨迹求和
-        traj_log_probs = chosen_log_probs.sum(dim=1)  # [B]
+        return seq_log_probs
+    
+    def compute_log_probs_per_beam(
+        self,
+        query_emb: torch.Tensor,
+        cand_emb: torch.Tensor,
+        beam_labels: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        计算每个beam的log概率
         
-        return traj_log_probs
+        Args:
+            query_emb: [B, d] query embedding
+            cand_emb: [B, K, d] 候选 embedding
+            beam_labels: [B, num_beams, S] 多个beam的标签序列
+        
+        Returns:
+            log_probs: [B, num_beams] 每个beam的log概率
+        """
+        batch_size, num_beams, shot_num = beam_labels.shape
+        
+        # 展开beam维度
+        # query_emb: [B, d] -> [B*num_beams, d]
+        query_expanded = query_emb.unsqueeze(1).expand(-1, num_beams, -1)
+        query_expanded = query_expanded.reshape(batch_size * num_beams, -1)
+        
+        # cand_emb: [B, K, d] -> [B*num_beams, K, d]
+        cand_expanded = cand_emb.unsqueeze(1).expand(-1, num_beams, -1, -1)
+        cand_expanded = cand_expanded.reshape(batch_size * num_beams, self.K, -1)
+        
+        # beam_labels: [B, num_beams, S] -> [B*num_beams, S]
+        labels_flat = beam_labels.reshape(batch_size * num_beams, shot_num)
+        
+        # 计算log概率
+        log_probs_flat = self.compute_log_probs(query_expanded, cand_expanded, labels_flat)
+        
+        # 恢复形状: [B*num_beams] -> [B, num_beams]
+        log_probs = log_probs_flat.reshape(batch_size, num_beams)
+        
+        return log_probs
+    
+    def compute_advantage(
+        self,
+        rewards: torch.Tensor,
+        normalize: bool = True,
+        use_rank: bool = True
+    ) -> torch.Tensor:
+        """
+        计算组内相对优势（Group-Relative Advantage）
+        
+        来自强化学习.md 创新点3：
+        - 在每个query的5个beam内计算相对优势
+        - 避免跨query的奖励分布差异影响训练
+        - 更稳定的梯度信号
+        
+        来自强化学习.md 2.3节 奖励归一化策略：
+        - 组内Z-score：在每个query的5个beam内计算均值和标准差
+        - 优势裁剪：限制在[-5, 5]范围内，防止极端梯度
+        
+        【修复】当reward差异极小时，使用基于排名的归一化：
+        - 将reward转换为排名分数 [0, 1]
+        - 然后映射到 [-1, 1] 范围
+        - 这样即使原始reward差异很小，也能产生有意义的advantage
+        
+        Args:
+            rewards: [B, num_beams] 每个beam的奖励（分数）
+            normalize: 是否进行组内Z-score归一化
+            use_rank: 当reward差异太小时，使用基于排名的归一化
+        
+        Returns:
+            advantages: [B, num_beams] 组内相对优势
+        """
+        batch_size, num_beams = rewards.shape
+        
+        if use_rank:
+            # 【修复】始终使用基于排名的归一化
+            # 原因：infoscore等评分机制产生的reward差异通常很小
+            # Z-score归一化后advantage仍然接近0，无法提供有效的学习信号
+            # 排名归一化可以保证advantage在[-1, 1]范围内有意义
+            
+            # 获取排名（降序，最高reward排名为0）
+            ranks = rewards.argsort(dim=-1, descending=True).argsort(dim=-1).float()
+            # 归一化到 [-1, 1]
+            # 排名最高(0) -> 1.0, 排名最低(num_beams-1) -> -1.0
+            if num_beams > 1:
+                advantages = 1.0 - 2.0 * ranks / (num_beams - 1)
+            else:
+                advantages = torch.zeros_like(ranks)
+        else:
+            # 原始Z-score逻辑（保留作为备选）
+            if normalize:
+                mean = rewards.mean(dim=-1, keepdim=True)
+                std = rewards.std(dim=-1, keepdim=True)
+                std = torch.clamp(std, min=1e-8)
+                advantages = (rewards - mean) / std
+            else:
+                mean = rewards.mean(dim=-1, keepdim=True)
+                advantages = rewards - mean
+        
+        # 优势裁剪：限制在[-advantage_clip, advantage_clip]范围内
+        advantages = torch.clamp(advantages, -self.advantage_clip, self.advantage_clip)
+        
+        return advantages
+    
+    def compute_kl_divergence(
+        self,
+        log_probs_new: torch.Tensor,
+        log_probs_old: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        计算KL散度（近似）
+        
+        来自强化学习.md 2.2节 阶段3：
+        L_KL = E[r - 1 - log(r)]，其中 r = π_new / π_old = exp(log_π_new - log_π_old)
+        
+        这是KL散度的一阶近似：KL(π_new || π_old) ≈ E[r - 1 - log(r)]
+        
+        Args:
+            log_probs_new: [B, num_beams] 新策略的log概率
+            log_probs_old: [B, num_beams] 旧策略的log概率
+        
+        Returns:
+            kl: 标量，平均KL散度
+        """
+        # 计算概率比 r = π_new / π_old
+        log_ratio = log_probs_new - log_probs_old
+        ratio = torch.exp(log_ratio)
+        
+        # KL散度近似：r - 1 - log(r)
+        kl = ratio - 1 - log_ratio
+        
+        # 返回平均KL散度
+        return kl.mean()
     
     def compute_rce_loss(
         self,
         query_emb: torch.Tensor,
         cand_emb: torch.Tensor,
-        labels: torch.Tensor,
-        rewards: torch.Tensor
+        beam_labels: torch.Tensor,
+        beam_rewards: torch.Tensor,
+        temperature: float = 1.0,
+        use_rank_normalization: bool = True,
+        use_top1_only: bool = False
     ) -> torch.Tensor:
         """
-        计算RCE（Reward-weighted Cross-Entropy）损失
+        计算RCE（Reward-Conditioned Estimation）预热损失
+        
+        来自强化学习.md 2.2节 阶段2：RCE预热
+        - 目标：稳定地从监督学习过渡到强化学习
+        - 损失：L_RCE = Σ w_i * CE(π_new, labels_i)
+        - 其中 w_i = softmax(score_i / τ)
+        
+        【修复】使用排名归一化解决InfoScore分数差异过小的问题
+        - 问题：InfoScore分数差异~1e-8，导致softmax权重均匀
+        - 方案：将分数转换为排名，排名差异始终有意义
         
         Args:
-            query_emb: [B, d]
-            cand_emb: [B, K, d]
-            labels: [B, S]
-            rewards: [B] 每个轨迹的奖励
+            query_emb: [B, d] query embedding
+            cand_emb: [B, K, d] 候选 embedding
+            beam_labels: [B, num_beams, S] 多个beam的标签序列
+            beam_rewards: [B, num_beams] 每个beam的奖励（原始分数，未归一化）
+            temperature: 温度参数τ（从2.0线性降到0.5）
+            use_rank_normalization: 是否使用排名归一化（默认True，解决分数差异过小问题）
+            use_top1_only: 是否只使用Top-1 beam（回归V2监督学习方式）
         
         Returns:
-            rce_loss: 加权CE损失
+            loss: 标量，RCE损失
         """
-        # 计算权重：softmax(reward / temperature)
-        weights = F.softmax(rewards / self.rce_temperature, dim=0)  # [B]
+        batch_size, num_beams, shot_num = beam_labels.shape
         
-        # 前向传播获取logits
-        output = self.forward(
-            query_emb=query_emb,
-            cand_emb=cand_emb,
-            labels=labels,
-            return_loss=False
-        )
+        # 【回归V2方式】只使用Top-1 beam进行监督学习
+        if use_top1_only:
+            # 只取第一个beam（已按分数降序排列，第一个是最好的）
+            labels = beam_labels[:, 0, :]  # [B, S]
+            
+            # 直接计算交叉熵损失
+            result = self.forward(query_emb, cand_emb, labels=labels, return_loss=False)
+            logits = result['logits']  # [B, S, K]
+            
+            logits_for_loss = logits.reshape(-1, self.K)  # [B*S, K]
+            labels_for_loss = labels.reshape(-1)  # [B*S]
+            logits_for_loss = torch.clamp(logits_for_loss, min=-100.0)
+            
+            loss = F.cross_entropy(
+                logits_for_loss, labels_for_loss,
+                label_smoothing=self.label_smoothing
+            )
+            return loss
         
-        logits = output['logits']  # [B, S, K]
+        if use_rank_normalization:
+            # 【修复】使用排名归一化
+            # 将分数转换为排名，然后归一化到[0, 1]
+            # 排名越高（分数越大），归一化值越大
+            ranks = beam_rewards.argsort(dim=-1).argsort(dim=-1).float()  # [B, num_beams]
+            # 归一化排名到[0, 1]，最高排名为1，最低排名为0
+            normalized_scores = ranks / (num_beams - 1) if num_beams > 1 else ranks
+            # 使用归一化排名计算权重
+            weights = F.softmax(normalized_scores / temperature, dim=-1)  # [B, num_beams]
+        else:
+            # 原始方式：直接使用分数
+            weights = F.softmax(beam_rewards / temperature, dim=-1)  # [B, num_beams]
         
-        # 计算每个样本的CE损失
-        batch_size, shot_num, K = logits.shape
-        logits_flat = logits.reshape(-1, K)
-        labels_flat = labels.reshape(-1)
+        # 批量计算所有beam的损失（更高效）
+        # 展开beam维度: [B, num_beams, S] -> [B*num_beams, S]
+        labels_flat = beam_labels.reshape(batch_size * num_beams, shot_num)
         
-        # 逐样本CE
-        ce_losses = []
-        for b in range(batch_size):
-            sample_logits = logits[b].reshape(-1, K)  # [S, K]
-            sample_labels = labels[b].reshape(-1)  # [S]
-            sample_ce = F.cross_entropy(sample_logits, sample_labels, reduction='mean')
-            ce_losses.append(sample_ce)
+        # 扩展query和cand: [B, d] -> [B*num_beams, d]
+        query_expanded = query_emb.unsqueeze(1).expand(-1, num_beams, -1)
+        query_expanded = query_expanded.reshape(batch_size * num_beams, -1)
         
-        ce_losses = torch.stack(ce_losses)  # [B]
+        cand_expanded = cand_emb.unsqueeze(1).expand(-1, num_beams, -1, -1)
+        cand_expanded = cand_expanded.reshape(batch_size * num_beams, self.K, -1)
         
-        # 加权
-        rce_loss = (weights * ce_losses).sum()
+        # 前向传播
+        result = self.forward(query_expanded, cand_expanded, labels=labels_flat, return_loss=False)
+        logits = result['logits']  # [B*num_beams, S, K]
         
-        return rce_loss
+        # 计算每个样本的交叉熵损失
+        logits_for_loss = logits.reshape(-1, self.K)  # [B*num_beams*S, K]
+        labels_for_loss = labels_flat.reshape(-1)  # [B*num_beams*S]
+        logits_for_loss = torch.clamp(logits_for_loss, min=-100.0)
+        
+        # 不使用reduction，得到每个元素的损失
+        ce_losses = F.cross_entropy(
+            logits_for_loss, labels_for_loss,
+            label_smoothing=self.label_smoothing,
+            reduction='none'
+        )  # [B*num_beams*S]
+        
+        # 重塑并对shot维度求和: [B*num_beams*S] -> [B, num_beams]
+        ce_losses = ce_losses.reshape(batch_size, num_beams, shot_num).sum(dim=-1)  # [B, num_beams]
+        
+        # 加权求和
+        weighted_loss = (weights * ce_losses).sum(dim=-1).mean()  # 标量
+        
+        return weighted_loss
     
     def compute_grpo_loss(
         self,
         query_emb: torch.Tensor,
         cand_emb: torch.Tensor,
-        labels: torch.Tensor,
-        rewards: torch.Tensor,
-        old_log_probs: torch.Tensor
+        beam_labels: torch.Tensor,
+        beam_rewards: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        use_top_k: Optional[int] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        计算GRPO-PPO损失
+        计算GRPO（Group-Relative Policy Optimization）损失
+        
+        来自强化学习.md 2.2节 阶段3：GRPO训练
+        - 目标：最大化高分beam的概率，同时保持策略稳定性
+        - 损失：L_GRPO = L_PPO + β * L_KL
+          - L_PPO = -E[min(r * A, clip(r, 1-ε, 1+ε) * A)]
+          - L_KL = E[r - 1 - log(r)]
+        
+        来自强化学习.md 创新点4 课程学习策略：
+        - 阶段2（GRPO早期）：只使用top-3 beam，减少噪声
+        - 阶段3（GRPO后期）：使用所有beam，精细优化
         
         Args:
-            query_emb: [B, d]
-            cand_emb: [B, K, d]
-            labels: [B, S] 轨迹
-            rewards: [B] 奖励
-            old_log_probs: [B] 旧策略的log概率
+            query_emb: [B, d] query embedding
+            cand_emb: [B, K, d] 候选 embedding
+            beam_labels: [B, num_beams, S] 多个beam的标签序列
+            beam_rewards: [B, num_beams] 每个beam的奖励（分数）
+            old_log_probs: [B, num_beams] 旧策略（SFT模型）的log概率
+            use_top_k: 只使用top-k个beam（课程学习），None表示使用所有beam
         
         Returns:
-            dict: {'loss': total_loss, 'ppo_loss': ppo_loss, 'kl_loss': kl_loss}
+            dict: {
+                'loss': 总损失,
+                'ppo_loss': PPO损失,
+                'kl_loss': KL损失,
+                'kl': KL散度值,
+                'mean_ratio': 平均概率比,
+                'mean_advantage': 平均优势
+            }
         """
-        batch_size = query_emb.shape[0]
+        batch_size, num_beams, shot_num = beam_labels.shape
         
-        # 1. 归一化奖励（添加数值稳定性检查）
-        if self.reward_norm == 'zscore':
-            reward_std = rewards.std()
-            if reward_std < 1e-6:  # 避免除以接近0的数
-                normalized_rewards = rewards - rewards.mean()
-            else:
-                normalized_rewards = (rewards - rewards.mean()) / (reward_std + 1e-8)
-        elif self.reward_norm == 'minmax':
-            reward_range = rewards.max() - rewards.min()
-            if reward_range < 1e-6:  # 避免除以接近0的数
-                normalized_rewards = torch.zeros_like(rewards)
-            else:
-                normalized_rewards = (rewards - rewards.min()) / (reward_range + 1e-8)
-        else:
-            normalized_rewards = rewards
+        # 课程学习：只使用top-k个beam
+        if use_top_k is not None and use_top_k < num_beams:
+            # 按奖励排序，选择top-k
+            _, top_indices = beam_rewards.topk(use_top_k, dim=-1)  # [B, use_top_k]
+            
+            # 收集top-k的数据
+            beam_labels = torch.gather(
+                beam_labels, 
+                dim=1, 
+                index=top_indices.unsqueeze(-1).expand(-1, -1, shot_num)
+            )
+            beam_rewards = torch.gather(beam_rewards, dim=1, index=top_indices)
+            old_log_probs = torch.gather(old_log_probs, dim=1, index=top_indices)
+            num_beams = use_top_k
         
-        # 2. 计算组相对优势（Group-Relative Advantage）
-        baseline = normalized_rewards.mean()
-        advantages = normalized_rewards - baseline  # [B]
+        # 计算新策略的log概率
+        new_log_probs = self.compute_log_probs_per_beam(query_emb, cand_emb, beam_labels)
         
-        # 3. 裁剪优势
-        clipped_advantages = torch.clamp(advantages, -self.advantage_clip, self.advantage_clip)
+        # 计算组内相对优势
+        # 注意：beam_rewards应该是原始分数，这里进行归一化
+        advantages = self.compute_advantage(beam_rewards, normalize=True)
         
-        # 4. 计算当前策略的log概率
-        current_log_probs = self.compute_log_probs(query_emb, cand_emb, labels)  # [B]
+        # 计算概率比 r = π_new / π_old
+        log_ratio = new_log_probs - old_log_probs
+        ratio = torch.exp(log_ratio)
         
-        # 5. 计算概率比（添加数值稳定性）
-        log_ratio = current_log_probs - old_log_probs
-        # 裁剪log_ratio防止exp溢出（±5对应ratio在[0.0067, 148.4]之间）
-        log_ratio = torch.clamp(log_ratio, min=-5.0, max=5.0)
-        ratio = torch.exp(log_ratio)  # [B]
+        # PPO裁剪目标
+        # L_PPO = -E[min(r * A, clip(r, 1-ε, 1+ε) * A)]
+        clipped_ratio = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon)
         
-        # 6. PPO目标（裁剪版本）
-        surr1 = ratio * clipped_advantages
-        surr2 = torch.clamp(ratio, 1.0 - self.ppo_epsilon, 1.0 + self.ppo_epsilon) * clipped_advantages
-        ppo_loss = -torch.min(surr1, surr2).mean()
+        # 计算两个目标
+        obj1 = ratio * advantages
+        obj2 = clipped_ratio * advantages
         
-        # 7. KL散度正则（防止偏离太远）
-        kl_div = (ratio - 1.0 - log_ratio).mean()  # 近似KL
-        kl_loss = self.kl_beta * kl_div
+        # 取最小值（悲观估计）
+        ppo_obj = torch.min(obj1, obj2)
         
-        # 8. 总损失
+        # PPO损失（取负号，因为我们要最大化目标）
+        ppo_loss = -ppo_obj.mean()
+        
+        # 计算KL散度
+        kl = self.compute_kl_divergence(new_log_probs, old_log_probs)
+        kl_loss = self.kl_beta * kl
+        
+        # 总损失
         total_loss = ppo_loss + kl_loss
         
         return {
             'loss': total_loss,
             'ppo_loss': ppo_loss,
             'kl_loss': kl_loss,
+            'kl': kl,
             'mean_ratio': ratio.mean(),
-            'mean_advantage': advantages.mean()
+            'mean_advantage': advantages.mean(),
+            'std_advantage': advantages.std(),
+            'max_advantage': advantages.abs().max()
         }
     
-    def forward_with_mode(
+    def update_kl_beta(
         self,
-        query_emb: torch.Tensor,
-        cand_emb: torch.Tensor,
-        labels: Optional[torch.Tensor] = None,
-        rewards: Optional[torch.Tensor] = None,
-        old_log_probs: Optional[torch.Tensor] = None,
-        mode: str = 'supervised'  # 'supervised', 'rce', 'grpo'
-    ) -> Dict[str, torch.Tensor]:
+        current_kl: float,
+        kl_target_min: float = 0.01,
+        kl_target_max: float = 0.1,
+        adjustment_factor: float = 1.5
+    ) -> float:
         """
-        根据模式选择损失计算方式
+        KL散度自适应调整
+        
+        来自强化学习.md 创新点5：
+        - 监控KL散度，如果偏离过大（>0.1），增加kl_beta
+        - 如果KL过小（<0.01），减少kl_beta，允许更大更新
         
         Args:
-            mode: 'supervised' (V2标准), 'rce' (RCE加权), 'grpo' (GRPO-PPO)
+            current_kl: 当前KL散度值
+            kl_target_min: KL目标下限 (默认 0.01)
+            kl_target_max: KL目标上限 (默认 0.1)
+            adjustment_factor: 调整因子 (默认 1.5)
+        
+        Returns:
+            new_kl_beta: 调整后的kl_beta
         """
-        if mode == 'supervised':
-            # 标准V2监督学习
-            return super().forward(query_emb, cand_emb, labels, return_loss=True)
+        if current_kl > kl_target_max:
+            # KL过大，增加kl_beta以约束更新
+            self.kl_beta = self.kl_beta * adjustment_factor
+        elif current_kl < kl_target_min:
+            # KL过小，减少kl_beta以允许更大更新
+            self.kl_beta = self.kl_beta / adjustment_factor
         
-        elif mode == 'rce':
-            # RCE加权CE
-            if rewards is None:
-                raise ValueError("RCE模式需要提供rewards")
-            
-            rce_loss = self.compute_rce_loss(query_emb, cand_emb, labels, rewards)
-            return {'loss': rce_loss, 'rce_loss': rce_loss}
+        # 限制kl_beta的范围，防止极端值
+        self.kl_beta = max(0.001, min(10.0, self.kl_beta))
         
-        elif mode == 'grpo':
-            # GRPO-PPO后训练
-            if rewards is None or old_log_probs is None:
-                raise ValueError("GRPO模式需要提供rewards和old_log_probs")
-            
-            return self.compute_grpo_loss(query_emb, cand_emb, labels, rewards, old_log_probs)
-        
-        else:
-            raise ValueError(f"未知模式: {mode}")
+        return self.kl_beta
 
 
-def build_model_v3(config: PointerSelectorV3Config) -> PointerSelectorV3:
-    """构建V3模型的工厂函数"""
-    return PointerSelectorV3(**config.to_dict())
-
-
-def load_v3_from_v2_checkpoint(
-    checkpoint_path: str,
-    enable_rce: bool = False,
-    enable_grpo: bool = False,
-    rce_temperature: float = 1.0,
-    ppo_epsilon: float = 0.2,
-    kl_beta: float = 0.01
-) -> PointerSelectorV3:
+class PointerSelectorV3Config:
+    """V3 模型配置类
+    
+    继承V2配置，新增强化学习相关参数
     """
-    从V2 checkpoint加载V3模型（用于后训练）
+    
+    def __init__(
+        self,
+        d_model: int = 768,
+        K: int = 32,
+        shot_num: int = 2,
+        label_smoothing: float = 0.1,
+        dropout: float = 0.1,
+        hidden_dim: int = 256,
+        num_heads: int = 1,
+        attn_dropout: float = 0.1,
+        num_layers: int = 3,
+        # V3新增参数
+        clip_epsilon: float = 0.2,
+        kl_beta: float = 0.1,
+        advantage_clip: float = 5.0
+    ):
+        self.d_model = d_model
+        self.K = K
+        self.shot_num = shot_num
+        self.label_smoothing = label_smoothing
+        self.dropout = dropout
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.attn_dropout = attn_dropout
+        self.num_layers = num_layers
+        # V3新增
+        self.clip_epsilon = clip_epsilon
+        self.kl_beta = kl_beta
+        self.advantage_clip = advantage_clip
+    
+    def to_dict(self):
+        return {
+            'd_model': self.d_model,
+            'K': self.K,
+            'shot_num': self.shot_num,
+            'label_smoothing': self.label_smoothing,
+            'dropout': self.dropout,
+            'hidden_dim': self.hidden_dim,
+            'num_heads': self.num_heads,
+            'attn_dropout': self.attn_dropout,
+            'num_layers': self.num_layers,
+            'clip_epsilon': self.clip_epsilon,
+            'kl_beta': self.kl_beta,
+            'advantage_clip': self.advantage_clip
+        }
+
+
+def build_model_v3(config: Optional[PointerSelectorV3Config] = None) -> PointerSelectorV3:
+    """
+    构建 V3 模型的工厂函数
     
     Args:
-        checkpoint_path: V2模型checkpoint路径
-        enable_rce: 是否启用RCE
-        enable_grpo: 是否启用GRPO
-        [其他V3参数...]
+        config: 模型配置（可选）
     
     Returns:
-        初始化好的V3模型
+        PointerSelectorV3 实例
     """
-    print(f"从 V2 checkpoint 加载 V3 模型...")
-    print(f"Checkpoint: {checkpoint_path}")
+    if config is None:
+        config = PointerSelectorV3Config()
     
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"找不到V2 checkpoint: {checkpoint_path}")
-    
-    # 加载checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    
-    # 获取配置
-    if 'model_config' in checkpoint:
-        config_dict = checkpoint['model_config']
-    else:
-        raise ValueError("Checkpoint中没有model_config")
-    
-    # 检测是V3还是V2 checkpoint
-    is_v3_checkpoint = 'enable_rce' in config_dict or 'enable_grpo' in config_dict
-    
-    if is_v3_checkpoint:
-        # 这是V3 checkpoint，允许覆盖V3参数
-        print("检测到V3 checkpoint，直接加载...")
-        if enable_rce is not None:
-            config_dict['enable_rce'] = enable_rce
-        if enable_grpo is not None:
-            config_dict['enable_grpo'] = enable_grpo
-        if rce_temperature is not None:
-            config_dict['rce_temperature'] = rce_temperature
-        if ppo_epsilon is not None:
-            config_dict['ppo_epsilon'] = ppo_epsilon
-        if kl_beta is not None:
-            config_dict['kl_beta'] = kl_beta
-        
-        # 过滤掉不需要的参数（temperature在V3Config中不需要）
-        v3_config_dict = {k: v for k, v in config_dict.items() if k != 'temperature'}
-        
-        # 创建V3配置
-        v3_config = PointerSelectorV3Config(**v3_config_dict)
-        # 创建V3模型
-        model = build_model_v3(v3_config)
-        # 加载V3权重
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-            print("✓ 成功加载 V3 参数")
-        else:
-            raise ValueError("Checkpoint中没有model_state_dict")
-        
-        print("✓ V3模型已从V3 checkpoint加载")
-    else:
-        # 这是V2 checkpoint，转换为V3
-        print("检测到V2 checkpoint，转换为V3...")
-        
-        # 创建V3配置（继承V2配置 + V3参数）
-        v3_config = PointerSelectorV3Config(
-            d_model=config_dict.get('d_model', 768),
-            K=config_dict.get('K', 32),
-            shot_num=config_dict.get('shot_num', 6),
-            label_smoothing=config_dict.get('label_smoothing', 0.0),
-            dropout=config_dict.get('dropout', 0.5),
-            hidden_dim=config_dict.get('hidden_dim', 256),
-            num_heads=config_dict.get('num_heads', 1),
-            attn_dropout=config_dict.get('attn_dropout', 0.1),
-            num_layers=config_dict.get('num_layers', 3),
-            # V3特有
-            enable_rce=enable_rce,
-            enable_grpo=enable_grpo,
-            rce_temperature=rce_temperature,
-            ppo_epsilon=ppo_epsilon,
-            kl_beta=kl_beta
-        )
-        
-        # 创建V3模型
-        model = build_model_v3(v3_config)
-        
-        # 加载V2的权重
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-            print("✓ 成功加载 V2 参数")
-        else:
-            raise ValueError("Checkpoint中没有model_state_dict")
-        
-        print("✓ V3模型已从V2加载并初始化")
+    model = PointerSelectorV3(
+        d_model=config.d_model,
+        K=config.K,
+        shot_num=config.shot_num,
+        label_smoothing=config.label_smoothing,
+        dropout=config.dropout,
+        hidden_dim=config.hidden_dim,
+        num_heads=config.num_heads,
+        attn_dropout=config.attn_dropout,
+        num_layers=config.num_layers,
+        clip_epsilon=config.clip_epsilon,
+        kl_beta=config.kl_beta,
+        advantage_clip=config.advantage_clip
+    )
     
     return model
+
+
+if __name__ == "__main__":
+    """测试代码"""
+    print("="*70)
+    print("测试 PointerSelectorV3 模型")
+    print("="*70)
+    
+    # 创建模型
+    model = build_model_v3()
+    
+    # 创建测试数据
+    batch_size = 4
+    d_model = 768
+    K = 32
+    shot_num = 2
+    num_beams = 5  # 5个beam
+    
+    query_emb = torch.randn(batch_size, d_model)
+    cand_emb = torch.randn(batch_size, K, d_model)
+    
+    # 单个标签（用于基础测试）
+    labels = torch.randint(0, K, (batch_size, shot_num))
+    
+    # 多个beam的标签和奖励
+    beam_labels = torch.randint(0, K, (batch_size, num_beams, shot_num))
+    beam_rewards = torch.tensor([
+        [0.046, 0.045, 0.037, 0.035, 0.030],
+        [0.050, 0.048, 0.040, 0.038, 0.035],
+        [0.042, 0.041, 0.039, 0.036, 0.032],
+        [0.055, 0.052, 0.045, 0.042, 0.038]
+    ])
+    
+    print(f"\n输入形状:")
+    print(f"  query_emb: {query_emb.shape}")
+    print(f"  cand_emb: {cand_emb.shape}")
+    print(f"  labels: {labels.shape}")
+    print(f"  beam_labels: {beam_labels.shape}")
+    print(f"  beam_rewards: {beam_rewards.shape}")
+    
+    # 测试1：基础前向传播（继承自V2）
+    print(f"\n测试1：基础前向传播...")
+    result = model(query_emb, cand_emb, labels, return_loss=True)
+    print(f"  logits: {result['logits'].shape}")
+    print(f"  predictions: {result['predictions'].shape}")
+    print(f"  loss: {result['loss'].item():.4f}")
+    
+    # 测试2：计算log概率
+    print(f"\n测试2：计算log概率...")
+    log_probs = model.compute_log_probs(query_emb, cand_emb, labels)
+    print(f"  log_probs: {log_probs.shape}, values: {log_probs.tolist()}")
+    
+    # 测试3：计算每个beam的log概率
+    print(f"\n测试3：计算每个beam的log概率...")
+    beam_log_probs = model.compute_log_probs_per_beam(query_emb, cand_emb, beam_labels)
+    print(f"  beam_log_probs: {beam_log_probs.shape}")
+    print(f"  values: {beam_log_probs[0].tolist()}")
+    
+    # 测试4：计算组内相对优势
+    print(f"\n测试4：计算组内相对优势...")
+    advantages = model.compute_advantage(beam_rewards, normalize=True)
+    print(f"  advantages: {advantages.shape}")
+    print(f"  values: {advantages[0].tolist()}")
+    print(f"  mean: {advantages.mean():.4f}, std: {advantages.std():.4f}")
+    assert advantages.min() >= -5 and advantages.max() <= 5, "优势应在[-5, 5]范围内"
+    print(f"  ✓ 优势值在[-5, 5]范围内")
+    
+    # 测试5：计算RCE损失
+    print(f"\n测试5：计算RCE损失...")
+    rce_loss = model.compute_rce_loss(
+        query_emb, cand_emb, beam_labels, beam_rewards, temperature=2.0
+    )
+    print(f"  RCE loss (τ=2.0): {rce_loss.item():.4f}")
+    
+    rce_loss_low_temp = model.compute_rce_loss(
+        query_emb, cand_emb, beam_labels, beam_rewards, temperature=0.5
+    )
+    print(f"  RCE loss (τ=0.5): {rce_loss_low_temp.item():.4f}")
+    
+    # 测试6：计算GRPO损失
+    print(f"\n测试6：计算GRPO损失...")
+    # 模拟旧策略的log概率
+    old_log_probs = beam_log_probs.detach() + torch.randn_like(beam_log_probs) * 0.1
+    
+    grpo_result = model.compute_grpo_loss(
+        query_emb, cand_emb, beam_labels, beam_rewards, old_log_probs
+    )
+    print(f"  GRPO total loss: {grpo_result['loss'].item():.4f}")
+    print(f"  PPO loss: {grpo_result['ppo_loss'].item():.4f}")
+    print(f"  KL loss: {grpo_result['kl_loss'].item():.4f}")
+    print(f"  KL: {grpo_result['kl'].item():.4f}")
+    print(f"  mean_ratio: {grpo_result['mean_ratio'].item():.4f}")
+    print(f"  mean_advantage: {grpo_result['mean_advantage'].item():.4f}")
+    
+    # 测试7：课程学习（只使用top-3 beam）
+    print(f"\n测试7：课程学习（只使用top-3 beam）...")
+    grpo_result_top3 = model.compute_grpo_loss(
+        query_emb, cand_emb, beam_labels, beam_rewards, old_log_probs,
+        use_top_k=3
+    )
+    print(f"  GRPO loss (top-3): {grpo_result_top3['loss'].item():.4f}")
+    
+    # 测试8：KL自适应调整
+    print(f"\n测试8：KL自适应调整...")
+    print(f"  初始 kl_beta: {model.kl_beta}")
+    
+    # 模拟KL过大
+    model.update_kl_beta(current_kl=0.15, kl_target_max=0.1)
+    print(f"  KL=0.15 (>0.1) 后 kl_beta: {model.kl_beta:.4f}")
+    
+    # 模拟KL过小
+    model.kl_beta = 0.1  # 重置
+    model.update_kl_beta(current_kl=0.005, kl_target_min=0.01)
+    print(f"  KL=0.005 (<0.01) 后 kl_beta: {model.kl_beta:.4f}")
+    
+    print("\n" + "="*70)
+    print("✓ V3 模型测试通过！")
+    print("="*70)

@@ -66,7 +66,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 ```bash
 # 随机采样器（RandSampler）
-bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler flamingo_3B
+bash scripts/generate_data.sh vqa okvqa_local "[4]" rand_sampler flamingo_3B
 
 # 文本相似度采样器（TextSimSampler）
 bash scripts/generate_data.sh vqa okvqa_local "[5]" text_sim_sampler flamingo_3B
@@ -82,16 +82,16 @@ bash scripts/generate_data.sh vqa okvqa_local "[7]" mix_sampler flamingo_3B
 
 ```bash
 # 随机采样器（RandSampler）
-bash scripts/generate_data.sh vqa okvqa_local "[1]" rand_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
 
 # 文本相似度采样器（TextSimSampler）
-bash scripts/generate_data.sh vqa okvqa_local "[2]" text_sim_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
 
 # 图片相似度采样器（ImgSimSampler）
-bash scripts/generate_data.sh vqa okvqa_local "[3]" img_sim_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
 
 # 混合采样器（MixSampler）
-bash scripts/generate_data.sh vqa okvqa_local "[4]" mix_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
 ```
 
 #### 使用 VQAv2 数据集
@@ -130,43 +130,64 @@ bash scripts/generate_data.sh vqa vqav2_local "[2]" img_sim_sampler qwen2.5_vl_3
 bash scripts/generate_data.sh vqa vqav2_local "[3]" mix_sampler qwen2.5_vl_3B
 ```
 
-### 2.2 训练模型（训练 Pointer Selector）
+### 2.2 训练模型（训练范例选择器）
+
+**模型架构说明**：
+- **v0**: `GPT2LeverLM` - 基于GPT2的自回归语言模型，通过生成范例索引序列
+- **v1**: `PointerSelectorV1` - Bi-Encoder指针网络架构，独立编码query和candidates
+- **v2**: `PointerSelectorV2` - v1 + 多层Cross-Attention（3层）
+- **v2_lora**: `PointerSelectorV2` + LoRA微调CLIP
+- **v3**: `PointerSelectorV3` - v2 + 离线强化学习（RCE + GRPO）
 
 **参数说明**: `task dataset gpu_id lever_lm sampler [beam_model] [version]`
 
 - `gpu_id`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
+- `sampler` 可选值（4种采样器类型）：
+  - `rand_sampler`: 随机采样器（RandSampler）- 从训练集中随机选择候选范例
+  - `text_sim_sampler`: 文本相似度采样器（TextSimSampler）- 基于CLIP文本编码的余弦相似度选择候选
+  - `img_sim_sampler`: 图片相似度采样器（ImgSimSampler）- 基于CLIP图像编码的余弦相似度选择候选
+  - `mix_sampler`: 混合采样器（MixSampler）- 结合文本和图像相似度的综合采样
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
-- `version` 可选值: `v0` (默认), `v1`, `v2`, `v2_lora`, `v3` - 模型版本号，用于区分不同版本的模型代码和检查点
+- `version` 可选值: `v0`, `v1`, `v2`, `v2_lora`, `v3` - 模型版本号
+  - **注意**：`v0` 是GPT2自回归模型，`v1/v2/v3` 是Pointer Selector指针网络
   - **注意**：`v2_lora` 版本在训练时使用 LoRA 解冻 CLIP，减少可训练参数，提升训练效率
-- **注意**: `beam_model` 必须与生成数据时使用的模型一致
+- **注意**: `beam_model` 和 `sampler` 必须与生成数据时使用的一致
 - **注意**: 检查点文件保存在 `results/{dataset}/model_cpk/{version}/` 目录下
 
 #### 使用 Flamingo-3B 生成的束搜索数据训练
 
 ```bash
-# 随机采样器（使用 GPU 0，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 5 query_img_text_icd_img_text rand_sampler flamingo_3B v2_lora
+# v0版本训练（GPT2自回归语言模型，通过生成范例索引序列）
+bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v0
 
-# 文本相似度采样器（使用 GPU 1，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 6 query_img_text_icd_img_text text_sim_sampler flamingo_3B v2_lora
-
-# 图片相似度采样器（使用 GPU 2，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 7 query_img_text_icd_img_text img_sim_sampler flamingo_3B v2_lora
-
-# 混合采样器（使用 GPU 3，默认版本 v0）
-bash scripts/train_lever_lm.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B v2_lora
-
-# v1版本训练（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
+# v1版本训练（Bi-Encoder指针网络，独立编码query和candidates）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v1
 
-# v2版本训练（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
+# v2版本训练（v1 + 多层Cross-Attention，增强query与candidates交互）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2
 
-# v2_lora版本训练（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
+# v2_lora版本训练（v2 + LoRA解冻CLIP，减少可训练参数）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v2_lora
 
-# v3版本训练（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
-bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler flamingo_3B v3
+# v3版本训练（V2 + 离线强化学习，GRPO训练）
+# 注意：v3训练前需要先完成以下步骤：
+#   1. 训练 v2 模型（作为 SFT checkpoint）
+#   2. 导出 embeddings: bash scripts/export_embeddings.sh
+#   3. 生成 RL 数据: bash scripts/generate_rl_data.sh
+bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+
+# v3 训练参数可通过环境变量自定义（可选）：
+# 默认参数（当前配置，可能不是最优）：
+# export RCE_EPOCHS=25 GRPO_EPOCHS=25 BATCH_SIZE=1
+# export RCE_LR=5e-4 GRPO_LR=5e-6 KL_BETA=0.3
+# export REWARD_ALPHA=0.2 REWARD_BETA=1.0
+# bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+
+# 优化后的参数（推荐，参见 GRPO训练优化建议.md）：
+# export RCE_EPOCHS=3 GRPO_EPOCHS=8 BATCH_SIZE=4
+# export RCE_LR=1e-5 GRPO_LR=1e-5 KL_BETA=0.1
+# export REWARD_ALPHA=0.5 REWARD_BETA=0.8
+# bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 生成的束搜索数据训练
@@ -193,6 +214,50 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 # v2_lora版本训练（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
 bash scripts/train_lever_lm.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2_lora
 
+# v3版本训练（V2 + 离线强化学习，GRPO训练）
+# 注意：v3支持四种采样器，需要为每种采样器分别训练
+# 
+# 训练前准备（只需要执行一次）：
+#   1. 训练 v2 模型（作为 SFT checkpoint，每种采样器都需要）
+#   2. 导出 embeddings（通用，所有采样器共享）:
+#      bash scripts/export_embeddings.sh
+#
+# 为每种采样器生成 RL 数据（采样器特定，需要分别生成）:
+#   bash scripts/generate_rl_data_for_sampler.sh rand_sampler qwen2.5_vl_3B okvqa_local cuda:0
+#   bash scripts/generate_rl_data_for_sampler.sh text_sim_sampler qwen2.5_vl_3B okvqa_local cuda:2
+#   bash scripts/generate_rl_data_for_sampler.sh img_sim_sampler qwen2.5_vl_3B okvqa_local cuda:3
+#   bash scripts/generate_rl_data_for_sampler.sh mix_sampler qwen2.5_vl_3B okvqa_local cuda:4
+#
+# 训练 v3 模型（每种采样器分别训练）:
+# 
+# 方法1: 使用优化后的参数（推荐，参见 GRPO训练优化建议.md）
+# 优化参数: RCE_EPOCHS=3, GRPO_EPOCHS=8, BATCH_SIZE=4, RCE_LR=1e-5, GRPO_LR=1e-5, KL_BETA=0.1, REWARD_ALPHA=0.5, REWARD_BETA=0.8
+
+# RandSampler（使用优化参数）
+bash scripts/train_v3_optimized.sh 1 rand_sampler
+
+# TextSimSampler（使用优化参数）
+bash scripts/train_v3_optimized.sh 2 text_sim_sampler
+
+# ImgSimSampler（使用优化参数）
+bash scripts/train_v3_optimized.sh 3 img_sim_sampler
+
+# MixSampler（使用优化参数）
+bash scripts/train_v3_optimized.sh 4 mix_sampler
+
+# 方法2: 使用默认参数（不推荐，可能导致过拟合）
+# RandSampler
+# bash scripts/train_lever_lm.sh vqa okvqa_local 1 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+
+# TextSimSampler
+# bash scripts/train_lever_lm.sh vqa okvqa_local 2 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B v3
+
+# ImgSimSampler
+# bash scripts/train_lever_lm.sh vqa okvqa_local 3 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B v3
+
+# MixSampler
+# bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B v3
+
 # v4版本训练（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
 bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4
 ```
@@ -216,6 +281,271 @@ bash scripts/train_lever_lm.sh vqa okvqa_local 4 query_img_text_icd_img_text ran
 - 训练：使用 `v2_lora` 版本，训练时 CLIP 使用 LoRA
 - 推理：使用训练好的模型（包含 LoRA 权重）
 
+#### V3 GRPO 强化学习训练
+
+V3 在 V2 基础上新增离线强化学习阶段，通过 RCE 预热 + GRPO 后训练，利用束搜索的多条 beam 及分数进一步优化。
+
+**新RL数据格式说明**（包含 beam、温度采样、随机组合和 correctness）：
+```json
+{
+  "query_id": {
+    "pointer_candidates": [
+      {
+        "pointer": [7, 22],
+        "gen_method": "beam",
+        "beam_rank": 0,
+        "beam_score": 2.13,
+        "logprob_score": -1.56,
+        "temperature": null,
+        "vqa_pred_answer": "a book",
+        "vqa_correct": 1,
+        "vqa_acc_score": 1.0
+      },
+      {
+        "pointer": [5, 18],
+        "gen_method": "sample",
+        "beam_rank": null,
+        "beam_score": null,
+        "logprob_score": -2.03,
+        "temperature": 1.0,
+        "vqa_pred_answer": "a notebook",
+        "vqa_correct": 1,
+        "vqa_acc_score": 0.9
+      }
+    ]
+  }
+}
+```
+
+**Step 0: 导出 Embeddings**
+
+在生成 RL 数据之前，需要先导出 query 和 candidate embeddings，以加速后续的 RL 数据生成过程。
+
+**重要说明**：
+- **Embeddings 是通用的**：`query_embeddings.pt` 和 `candidate_embeddings.pt` 不依赖于采样器，因为它们只是对训练集中所有样本的编码
+- **只需要生成一次**：所有采样器（RandSampler, TextSimSampler, ImgSimSampler, MixSampler）都可以使用同一份 embeddings
+- **RL 数据是采样器特定的**：每个采样器需要单独生成对应的 RL 数据，因为不同采样器会选择不同的候选池
+
+```bash
+# 基本用法（使用默认参数）
+bash scripts/export_embeddings.sh
+
+# 完整参数用法
+bash scripts/export_embeddings.sh \
+    results/okvqa/model_cpk/v2/Qwen2_5_VL_3B_Instruct_RandSampler_infoscore_left_beam5_shot2_cand64_sample800_epoch=19_train=24.18280_val=21.98483.ckpt \
+    okvqa_local \
+    results/okvqa/cache \
+    cuda:0
+
+# 如果 checkpoint 中没有配置信息，可以指定 train_config
+bash scripts/export_embeddings.sh \
+    results/okvqa/model_cpk/v2/xxx.ckpt \
+    okvqa_local \
+    results/okvqa/cache \
+    cuda:0 \
+    configs/train/lever_lm/v2/query_img_text_icd_img_text_lever_lm.yaml
+```
+
+**输出文件**：
+- `results/okvqa/cache/query_embeddings.pt` - Query embeddings（通用，所有采样器共享）
+- `results/okvqa/cache/candidate_embeddings.pt` - Candidate embeddings（通用，所有采样器共享）
+
+**Step 1: 生成束搜索数据（用于RL数据生成）**
+```bash
+# 四种采样器都需要重新生成（用于后续RL数据生成）
+bash scripts/generate_data.sh vqa okvqa_local "[0]" rand_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[1]" text_sim_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[2]" img_sim_sampler qwen2.5_vl_3B
+bash scripts/generate_data.sh vqa okvqa_local "[3]" mix_sampler qwen2.5_vl_3B
+```
+
+**Step 2: 生成 RL 数据（包含 beam、温度采样、随机组合和 correctness）**
+
+使用 `generate_rl_data_for_sampler.sh` 脚本（推荐）或 `generate_rl_data.sh` 脚本生成 RL 数据，该脚本会：
+1. 从束搜索数据中提取 beam 序列
+2. 使用温度采样生成额外的候选序列
+3. 添加随机组合的候选序列
+4. 对每个候选序列调用 VQA 模型计算 correctness
+
+**重要说明**：
+- **RL 数据是采样器特定的**：每个采样器需要单独生成对应的 RL 数据，因为不同采样器会选择不同的候选池
+- **Embeddings 是通用的**：所有采样器使用相同的 `query_embeddings.pt` 和 `candidate_embeddings.pt`（Step 0 生成）
+
+**推荐方式：使用便捷脚本（自动查找文件）**
+
+```bash
+# 为 RandSampler 生成 RL 数据
+bash scripts/generate_rl_data_for_sampler.sh rand_sampler qwen2.5_vl_3B okvqa_local cuda:0
+
+# 为 TextSimSampler 生成 RL 数据
+bash scripts/generate_rl_data_for_sampler.sh text_sim_sampler qwen2.5_vl_3B okvqa_local cuda:2
+
+# 为 ImgSimSampler 生成 RL 数据
+bash scripts/generate_rl_data_for_sampler.sh img_sim_sampler qwen2.5_vl_3B okvqa_local cuda:3
+
+# 为 MixSampler 生成 RL 数据
+bash scripts/generate_rl_data_for_sampler.sh mix_sampler qwen2.5_vl_3B okvqa_local cuda:4
+```
+
+**手动方式：使用完整参数**
+
+```bash
+# RandSampler 示例
+bash scripts/generate_rl_data.sh \
+    results/okvqa/model_cpk/v2/Qwen2_5_VL_3B_Instruct_RandSampler_infoscore_left_beam5_shot2_cand64_sample800_epoch=19_train=24.18280_val=21.98483.ckpt \
+    results/okvqa/generated_data/vqa-okvqa-Qwen2_5-VL-3B-Instruct-RandSampler-scorer:infoscore-construct_order:left-beam_size:5-max_shot:2-candidate_num:64-sample_num:800.json \
+    results/okvqa/generated_data/rl_data_RandSampler.json \
+    results/okvqa/cache/query_embeddings.pt \
+    results/okvqa/cache/candidate_embeddings.pt \
+    cuda:7 \
+    qwen2.5_vl_3B \
+    okvqa_local
+
+# TextSimSampler（注意：beam_data 和 output_path 需要对应 TextSimSampler）
+bash scripts/generate_rl_data.sh \
+    results/okvqa/model_cpk/v2/Qwen2_5_VL_3B_Instruct_TextSimSampler_xxx.ckpt \
+    results/okvqa/generated_data/vqa-okvqa-Qwen2_5-VL-3B-Instruct-TextSimSampler-scorer:infoscore-construct_order:left-beam_size:5-max_shot:2-candidate_num:64-sample_num:800.json \
+    results/okvqa/generated_data/rl_data_TextSimSampler.json \
+    results/okvqa/cache/query_embeddings.pt \
+    results/okvqa/cache/candidate_embeddings.pt \
+    cuda:7 \
+    qwen2.5_vl_3B \
+    okvqa_local
+```
+
+**参数说明**：
+- `sft_ckpt`: SFT 模型（v2）checkpoint 路径
+- `beam_data`: 束搜索数据 JSON 路径（Step 1 生成）
+- `output_path`: 输出 RL 数据 JSON 路径
+- `query_emb`: Query embeddings 路径（Step 0 生成）
+- `cand_emb`: Candidate embeddings 路径（Step 0 生成）
+- `device`: GPU 设备（如 cuda:0, cuda:7）
+- `vqa_model`: VQA 模型名称（默认: qwen2.5_vl_3B）
+- `dataset`: 数据集名称（默认: okvqa_local）
+
+**输出文件**：
+- `results/okvqa/generated_data/rl_data_{Sampler}.json` - 包含所有候选序列和 correctness 的 RL 数据
+
+**Step 3: GRPO Post-Training（使用新RL数据格式）**
+```bash
+# 对每种采样器的数据进行预处理
+python -c "
+import json
+import numpy as np
+
+for sampler in ['RandSampler', 'TextSimSampler', 'ImgSimSampler', 'MixSampler']:
+    input_path = f'results/okvqa/generated_data/vqa-okvqa-flamingo_3B-{sampler}-scorer:infoscore-construct_order:left-beam_size:5-few_shot:2-candidate_num:64-sample_num:800.json'
+    output_path = f'results/okvqa/generated_data/beam_{sampler}_linear01.json'
+    
+    with open(input_path, 'r') as f:
+        data = json.load(f)
+    
+    improved_data = {}
+    for qid, item in data.items():
+        scores = np.array(item['score_list'])
+        if scores.max() != scores.min():
+            normalized = (scores - scores.min()) / (scores.max() - scores.min())
+            improved = 0.1 + 0.9 * normalized
+        else:
+            improved = np.ones_like(scores)
+        improved_data[qid] = {
+            'id_list': item['id_list'], 
+            'score_list': improved.tolist(),
+            'shot_scores': item.get('shot_scores', [])  # 保留shot_scores
+        }
+    
+    with open(output_path, 'w') as f:
+        json.dump(improved_data, f)
+    print(f'预处理完成: {output_path}')
+"
+```
+
+**Step 3: GRPO Post-Training（使用新RL数据格式）**
+
+使用新生成的 RL 数据进行 GRPO 训练：
+
+```bash
+# RandSampler（使用新RL数据格式，batch_size=1）
+CUDA_VISIBLE_DEVICES=0 python -m lever_lm.workflows.grpo_post_train \
+    --beam_data "results/okvqa/generated_data/rl_data_RandSampler.json" \
+    --img_emb "results/okvqa/cache/query_embeddings.pt" \
+    --output_dir "results/okvqa/model_cpk/v3_RandSampler" \
+    --rce_epochs 25 \
+    --grpo_epochs 25 \
+    --batch_size 1 \
+    --rce_lr 5e-4 \
+    --grpo_lr 5e-6 \
+    --kl_beta 0.3 \
+    --reward_alpha 0.2 \
+    --reward_beta 1.0 \
+    --device cuda:0
+
+# TextSimSampler
+CUDA_VISIBLE_DEVICES=1 python -m lever_lm.workflows.grpo_post_train \
+    --beam_data "results/okvqa/generated_data/rl_data_TextSimSampler.json" \
+    --img_emb "results/okvqa/cache/query_embeddings.pt" \
+    --output_dir "results/okvqa/model_cpk/v3_TextSimSampler" \
+    --rce_epochs 25 --grpo_epochs 25 --batch_size 1 \
+    --rce_lr 5e-4 --grpo_lr 5e-6 --kl_beta 0.3 \
+    --reward_alpha 0.2 --reward_beta 1.0 --device cuda:0
+
+# ImgSimSampler
+CUDA_VISIBLE_DEVICES=2 python -m lever_lm.workflows.grpo_post_train \
+    --beam_data "results/okvqa/generated_data/rl_data_ImgSimSampler.json" \
+    --img_emb "results/okvqa/cache/query_embeddings.pt" \
+    --output_dir "results/okvqa/model_cpk/v3_ImgSimSampler" \
+    --rce_epochs 25 --grpo_epochs 25 --batch_size 1 \
+    --rce_lr 5e-4 --grpo_lr 5e-6 --kl_beta 0.3 \
+    --reward_alpha 0.2 --reward_beta 1.0 --device cuda:0
+
+# MixSampler
+CUDA_VISIBLE_DEVICES=3 python -m lever_lm.workflows.grpo_post_train \
+    --beam_data "results/okvqa/generated_data/rl_data_MixSampler.json" \
+    --img_emb "results/okvqa/cache/query_embeddings.pt" \
+    --output_dir "results/okvqa/model_cpk/v3_MixSampler" \
+    --rce_epochs 25 --grpo_epochs 25 --batch_size 1 \
+    --rce_lr 5e-4 --grpo_lr 5e-6 --kl_beta 0.3 \
+    --reward_alpha 0.2 --reward_beta 1.0 --device cuda:0
+```
+
+**注意**：
+- 新 RL 数据格式要求 `batch_size=1`（每个 batch 对应一个 query-group）
+- `--img_emb` 参数应指向 `query_embeddings.pt`（而非旧的 `ImgFeatures.pth`）
+- `--reward_alpha` 和 `--reward_beta` 用于控制 reward 权重（beam_score 和 correctness）
+
+**Step 4: 评估V3模型**
+```bash
+export OKVQA_PATH="datasets/okvqa"
+export COCO_PATH="datasets/mscoco"
+
+# 评估（使用V2的CLIP+LoRA进行embedding生成）
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_v3_with_v2_clip.py \
+    --v2_ckpt "results/okvqa/model_cpk/v2_lora/xxx.ckpt" \
+    --v3_ckpt "results/okvqa/model_cpk/v3_ImgSimSampler/grpo_epoch25.pt" \
+    --dataset okvqa \
+    --shot_num 1 \
+    --test_num 500 \
+    --device cuda:0
+```
+
+**GRPO 超参数说明**：
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--rce_epochs` | 25 | RCE预热轮数 |
+| `--grpo_epochs` | 25 | GRPO强化学习轮数 |
+| `--rce_lr` | 5e-4 | RCE学习率 |
+| `--grpo_lr` | 5e-6 | GRPO学习率（越小越稳定） |
+| `--kl_beta` | 0.3 | KL散度权重（越大策略变化越保守） |
+| `--batch_size` | 32 | 批次大小 |
+
+**V3 vs V2 性能对比**（OKVQA，500样本）：
+| Sampler | V2 | V3 (GRPO) | 提升 |
+|---------|-----|-----------|------|
+| RandSampler | 50.56% | 50.08% | -0.48% |
+| TextSimSampler | 50.56% | 51.04% | +0.48% |
+| ImgSimSampler | 50.56% | 51.16% | +0.60% |
+| MixSampler | 50.56% | 51.24% | +0.68% |
+
 ### 2.4 基线
 
 **参数说明**: `task dataset device model`
@@ -236,12 +566,13 @@ bash scripts/baseline.sh vqa okvqa_local 1 qwen2.5_vl_3B
 
 ### 2.5 推理
 
-**参数说明**: `task dataset device lever_lm sampler [beam_model] [version]`
+**参数说明**: `task dataset device lever_lm sampler [beam_model] [version] [test_data_num]`
 
 - `device`: GPU 编号，例如 0 表示使用 GPU 0，1 表示使用 GPU 1（默认: 0）
 - `beam_model` 可选值: `flamingo_3B` (默认) 或 `qwen2.5_vl_3B`
 - `version` 可选值: `v0` (默认), `v1`, `v2`, `v2_lora`, `v3`, `v4` - 模型版本号，必须与训练时使用的版本一致
   - **注意**：`v2_lora` 版本使用 LoRA 解冻 CLIP，推理时会自动加载 LoRA 权重
+- `test_data_num` 可选值: 推理数据数量（默认: 100），设置为 `-1` 表示使用全部数据
 - **注意**: `beam_model` 必须与训练时使用的模型一致，用于选择对应的检查点文件
 - **注意**: `version` 必须与训练时使用的版本一致，用于从正确的目录加载检查点
 - **注意**: 推理时批量大小固定为1，避免批处理时的图像数量不匹配问题
@@ -289,8 +620,17 @@ bash scripts/inference.sh vqa okvqa_local 5 query_img_text_icd_img_text text_sim
 bash scripts/inference.sh vqa okvqa_local 6 query_img_text_icd_img_text img_sim_sampler flamingo_3B v2_lora
 bash scripts/inference.sh vqa okvqa_local 7 query_img_text_icd_img_text mix_sampler flamingo_3B v2_lora
 
-# v3版本推理（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
+# v3版本推理（V2 + 离线强化学习，GRPO训练，支持四种采样器）
+# 默认推理100条数据
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v3
+# 推理200条数据
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v3 200
+# 推理全部数据（设置为 -1）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler flamingo_3B v3 -1
+
+bash scripts/inference.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler flamingo_3B v3
+bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler flamingo_3B v3
+bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler flamingo_3B v3
 ```
 
 #### 使用 Qwen2.5-VL-3B-Instruct 训练的模型进行推理
@@ -310,15 +650,31 @@ bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_samp
 
 # v1版本推理（Bi-Encoder 指针网络架构，使用独立的编码器分别编码 query 和 candidates，通过 MLP 投影层和指针网络选择机制从候选池中选择范例）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1
+# 推理200条数据
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v1 200
 
 # v2版本推理（在 v1 的 Bi-Encoder 架构基础上添加了多层 Cross-Attention 机制（3 层），通过多头注意力增强 query 与 candidates 之间的细粒度交互能力，使用残差连接和 LayerNorm 提升训练稳定性）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2
+# 推理200条数据
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2 200
 
 # v2_lora版本推理（使用LoRA解冻CLIP，减少可训练参数，提升训练效率）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v2_lora
 bash scripts/inference.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B v2_lora
 bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B v2_lora
 bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B v2_lora
+
+# v3版本推理（V2 + 离线强化学习，GRPO训练，支持四种采样器）
+# 默认推理100条数据
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3
+# 推理200条数据
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3 200
+# 推理全部数据（设置为 -1）
+bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v3 -1
+
+bash scripts/inference.sh vqa okvqa_local 1 query_img_text_icd_img_text text_sim_sampler qwen2.5_vl_3B v3
+bash scripts/inference.sh vqa okvqa_local 2 query_img_text_icd_img_text img_sim_sampler qwen2.5_vl_3B v3
+bash scripts/inference.sh vqa okvqa_local 3 query_img_text_icd_img_text mix_sampler qwen2.5_vl_3B v3
 
 # v4版本推理（V2 + 离线强化学习，在 v2 基础上新增离线强化学习阶段：先 RCE 预热，再 GRPO（PPO-clip + KL）后训练，利用束搜索的多条 beam 及分数进一步优化候选排序与端到端指标）
 bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B v4

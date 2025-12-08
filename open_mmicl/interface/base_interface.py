@@ -111,15 +111,6 @@ class BaseInterface:
         # The model will calculate it from image_grid_thw if needed
         kwargs.pop('image_nums', None)
         
-        # Debug: Check image_grid_thw shape before passing to model.generate
-        if 'image_grid_thw' in kwargs:
-            from loguru import logger
-            logger.debug(f"image_grid_thw shape before generate: {kwargs['image_grid_thw'].shape}")
-            logger.debug(f"image_grid_thw value: {kwargs['image_grid_thw']}")
-            # Check if input_ids is present to understand batch structure
-            if 'input_ids' in kwargs:
-                logger.debug(f"input_ids shape: {kwargs['input_ids'].shape}")
-        
         with self.autocast_context:
             try:
                 return self.model.generate(*args, **kwargs)

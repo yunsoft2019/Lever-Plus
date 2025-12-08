@@ -1,0 +1,72 @@
+# GRPO Post-Training 配置
+# 来自强化学习.md 2.2节
+
+# 模型配置（继承V2）
+model:
+  _target_: lever_lm.models.v3.PointerSelectorV3
+  d_model: 768
+  K: 32
+  shot_num: 2
+  label_smoothing: 0.1
+  dropout: 0.1
+  hidden_dim: 256
+  num_heads: 1
+  attn_dropout: 0.1
+  num_layers: 3
+  # V3新增参数
+  clip_epsilon: 0.2
+  kl_beta: 0.1
+  advantage_clip: 5.0
+
+# CLIP编码器
+clip_name: openai/clip-vit-large-patch14
+
+# RCE预热阶段配置（来自强化学习.md 2.2节 阶段2）
+rce:
+  epochs: 1
+  lr: 1e-5  # SFT学习率的1/10
+  temperature_start: 2.0
+  temperature_end: 0.5
+  warmup_ratio: 0.1
+
+# GRPO训练阶段配置（来自强化学习.md 2.2节 阶段3）
+grpo:
+  epochs: 3
+  lr: 5e-6
+  # 课程学习（来自强化学习.md 创新点4）
+  curriculum:
+    # 阶段2（GRPO早期）：只使用top-3 beam
+    early_epochs: 1
+    early_top_k: 3
+    # 阶段3（GRPO后期）：使用所有beam
+    late_top_k: 5
+  # KL自适应（来自强化学习.md 创新点5）
+  kl_target_min: 0.01
+  kl_target_max: 0.1
+  kl_adjustment_factor: 1.5
+
+# 数据配置
+data:
+  beam_size: 5
+  shot_num: 2
+  normalize_rewards: true
+  train_ratio: 0.8
+
+# 训练配置（来自强化学习.md 2.3节 稳定性保障）
+training:
+  batch_size: 32
+  gradient_clip: 1.0
+  weight_decay: 0.01
+  scheduler: cosine
+  warmup_ratio: 0.1
+  save_every_epoch: true
+  
+# 日志配置（来自强化学习.md 2.3节 监控指标）
+logging:
+  log_every_steps: 10
+  metrics:
+    - ppo_loss
+    - kl_loss
+    - kl
+    - mean_ratio
+    - mean_advantage

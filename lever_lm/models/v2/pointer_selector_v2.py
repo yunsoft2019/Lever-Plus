@@ -168,13 +168,14 @@ class PointerSelectorV2(nn.Module):
         batch_size = query_emb.shape[0]
         device = query_emb.device
         
-        # 获取输入维度（可能是768或其他值）
+        # 获取输入维度和候选池大小（动态获取，支持不同K）
         input_dim = query_emb.shape[-1]
+        actual_K = cand_emb.shape[1]  # 使用实际的候选池大小
         
         # 步骤1：投影到 hidden_dim（如果需要降维）
         query_reduced = self.input_proj(query_emb)  # [B, hidden_dim]
         cand_reduced = self.input_proj(cand_emb.reshape(-1, input_dim))  # [B*K, hidden_dim]
-        cand_reduced = cand_reduced.reshape(batch_size, self.K, self.hidden_dim)  # [B, K, hidden_dim]
+        cand_reduced = cand_reduced.reshape(batch_size, actual_K, self.hidden_dim)  # [B, K, hidden_dim]
         
         # 【V2新增】步骤2：多层 Cross-Attention 增强
         # query作为Q，candidates作为K和V，通过多层增强query的表示
@@ -210,7 +211,8 @@ class PointerSelectorV2(nn.Module):
         predictions = []
         
         # mask：记录已选择的候选（初始全为 False）
-        selected_mask = torch.zeros(batch_size, self.K, dtype=torch.bool, device=device)
+        # 【修复】使用actual_K而非self.K，支持动态候选池大小
+        selected_mask = torch.zeros(batch_size, actual_K, dtype=torch.bool, device=device)
         
         # 自回归生成 shot_num 步
         for step in range(self.shot_num):

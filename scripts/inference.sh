@@ -6,7 +6,7 @@ lever_lm=${4:-query_img_icd_img_text}
 sampler=${5:-rand_sampler}
 beam_model=${6:-flamingo_3B}
 version=${7:-v0}
-test_data_num=${8:--1}  # 默认 -1 表示使用全部数据，可以设置为 200 等数字来限制推理数量
+test_data_num=${8:-100}  # 默认 100 条数据，设置为 -1 表示使用全部数据
 
 # 固定批量大小为 1，避免批处理时的图像数量不匹配问题
 inference_bs=1
@@ -85,61 +85,115 @@ checkpoint_dir="./results/${dataset_name}/model_cpk/${version}"
 model_name_safe=$(echo "$model_name" | sed 's/-/_/g' | sed 's/\./_/g')
 checkpoint_filename_pattern="${model_name_safe}_${sampler_name}_infoscore_left_beam5_shot2_cand64_sample${sample_num}"
 
-# 查找匹配的检查点文件
-# 1. 优先在当前数据集目录查找 resume 版本
-ckpt_files=($(ls -t "${checkpoint_dir}/${checkpoint_filename_pattern}"*resume*.ckpt 2>/dev/null))
-
-# 2. 如果没找到，在当前数据集目录查找原始版本
-if [ ${#ckpt_files[@]} -eq 0 ]; then
-    ckpt_files=($(ls -t "${checkpoint_dir}/${checkpoint_filename_pattern}"*.ckpt 2>/dev/null))
-fi
-
-# 3. 如果还是没找到，在当前数据集目录查找包含采样器名称的所有文件
-if [ ${#ckpt_files[@]} -eq 0 ]; then
-    ckpt_files=($(ls -t "${checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
-fi
-
-# 4. 如果还是没找到，在当前版本目录的父目录中搜索（兼容旧文件）
-if [ ${#ckpt_files[@]} -eq 0 ]; then
-    parent_checkpoint_dir="./results/${dataset_name}/model_cpk"
-    echo "在当前版本目录未找到检查点，尝试在父目录中搜索..."
-    if [ -d "$parent_checkpoint_dir" ]; then
-        found_files=($(ls -t "${parent_checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
-        if [ ${#found_files[@]} -gt 0 ]; then
-            ckpt_files+=("${found_files[@]}")
-            echo "  在 $parent_checkpoint_dir 中找到 ${#found_files[@]} 个匹配的检查点"
+# v3 使用 .pt 格式的 checkpoint（GRPO checkpoint）
+if [ "${version}" == "v3" ]; then
+    # v3 checkpoint 格式：grpo_epoch*.pt（优先使用最新的 grpo checkpoint）
+    echo "查找 v3 GRPO checkpoint (.pt 文件)..."
+    
+    # 1. 优先查找最新的 grpo_epoch*.pt 文件
+    grpo_files=($(ls -t "${checkpoint_dir}"/grpo_epoch*.pt 2>/dev/null))
+    
+    # 2. 如果没找到 grpo，查找 rce_epoch*.pt 文件
+    if [ ${#grpo_files[@]} -eq 0 ]; then
+        echo "未找到 grpo checkpoint，尝试查找 rce checkpoint..."
+        rce_files=($(ls -t "${checkpoint_dir}"/rce_epoch*.pt 2>/dev/null))
+        if [ ${#rce_files[@]} -gt 0 ]; then
+            grpo_files=("${rce_files[@]}")
         fi
     fi
-fi
-
-# 5. 如果还是没找到，在所有数据集目录的版本目录中搜索匹配的采样器检查点（跨数据集查找）
-if [ ${#ckpt_files[@]} -eq 0 ]; then
-    echo "在当前数据集目录未找到检查点，尝试在所有数据集目录的版本目录中搜索..."
-    # 搜索所有数据集目录的版本目录
-    for dir in ./results/*/model_cpk/${version}; do
-        if [ -d "$dir" ]; then
-            found_files=($(ls -t "$dir"/*${sampler_name}*.ckpt 2>/dev/null))
+    
+    # 3. 如果还是没找到，查找所有 .pt 文件
+    if [ ${#grpo_files[@]} -eq 0 ]; then
+        echo "未找到 grpo/rce checkpoint，查找所有 .pt 文件..."
+        grpo_files=($(ls -t "${checkpoint_dir}"/*.pt 2>/dev/null))
+    fi
+    
+    # 4. 跨数据集查找
+    if [ ${#grpo_files[@]} -eq 0 ]; then
+        echo "在当前数据集目录未找到 checkpoint，尝试在所有数据集目录的 v3 目录中搜索..."
+        for dir in ./results/*/model_cpk/v3; do
+            if [ -d "$dir" ]; then
+                found_files=($(ls -t "$dir"/grpo_epoch*.pt 2>/dev/null))
+                if [ ${#found_files[@]} -gt 0 ]; then
+                    grpo_files+=("${found_files[@]}")
+                    echo "  在 $dir 中找到 ${#found_files[@]} 个 grpo checkpoint"
+                fi
+            fi
+        done
+    fi
+    
+    # 使用最新的 checkpoint
+    if [ ${#grpo_files[@]} -gt 0 ]; then
+        ckpt_path=$(ls -t "${grpo_files[@]}" 2>/dev/null | head -1)
+        ckpt_filename=$(basename "$ckpt_path")
+        echo "✓ 找到 v3 checkpoint: ${ckpt_filename}"
+        echo "  检查点路径: ${ckpt_path}"
+        export LEVER_LM_CHECKPOINT_PATH="${ckpt_path}"
+        export LEVER_LM_CHECKPOINT_VERSION="v3"  # 标记这是 v3 checkpoint
+    else
+        echo "警告: 未找到 v3 checkpoint (.pt 文件)"
+        echo "查找目录: ${checkpoint_dir}"
+        echo "查找模式: grpo_epoch*.pt 或 rce_epoch*.pt"
+        unset LEVER_LM_CHECKPOINT_PATH
+        unset LEVER_LM_CHECKPOINT_VERSION
+    fi
+else
+    # v0, v1, v2, v2_lora 使用 .ckpt 格式的 checkpoint
+    # 1. 优先在当前数据集目录查找 resume 版本
+    ckpt_files=($(ls -t "${checkpoint_dir}/${checkpoint_filename_pattern}"*resume*.ckpt 2>/dev/null))
+    
+    # 2. 如果没找到，在当前数据集目录查找原始版本
+    if [ ${#ckpt_files[@]} -eq 0 ]; then
+        ckpt_files=($(ls -t "${checkpoint_dir}/${checkpoint_filename_pattern}"*.ckpt 2>/dev/null))
+    fi
+    
+    # 3. 如果还是没找到，在当前数据集目录查找包含采样器名称的所有文件
+    if [ ${#ckpt_files[@]} -eq 0 ]; then
+        ckpt_files=($(ls -t "${checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
+    fi
+    
+    # 4. 如果还是没找到，在当前版本目录的父目录中搜索（兼容旧文件）
+    if [ ${#ckpt_files[@]} -eq 0 ]; then
+        parent_checkpoint_dir="./results/${dataset_name}/model_cpk"
+        echo "在当前版本目录未找到检查点，尝试在父目录中搜索..."
+        if [ -d "$parent_checkpoint_dir" ]; then
+            found_files=($(ls -t "${parent_checkpoint_dir}"/*${sampler_name}*.ckpt 2>/dev/null))
             if [ ${#found_files[@]} -gt 0 ]; then
                 ckpt_files+=("${found_files[@]}")
-                echo "  在 $dir 中找到 ${#found_files[@]} 个匹配的检查点"
+                echo "  在 $parent_checkpoint_dir 中找到 ${#found_files[@]} 个匹配的检查点"
             fi
         fi
-    done
-fi
-
-# 如果找到了检查点，使用最新的
-if [ ${#ckpt_files[@]} -gt 0 ]; then
-    ckpt_path=$(ls -t "${ckpt_files[@]}" 2>/dev/null | head -1)
-    ckpt_filename=$(basename "$ckpt_path")
-    echo "找到检查点: ${ckpt_filename}"
-    echo "检查点路径: ${ckpt_path}"
-    # 使用环境变量传递检查点路径，避免 Hydra 解析路径中的特殊字符
-    export LEVER_LM_CHECKPOINT_PATH="${ckpt_path}"
-else
-    echo "警告: 在所有数据集目录中未找到匹配的检查点文件"
-    echo "查找模式: ${checkpoint_filename_pattern}*.ckpt 或 *${sampler_name}*.ckpt"
-    echo "将使用默认的检查点查找逻辑（基于 ex_name）"
-    unset LEVER_LM_CHECKPOINT_PATH
+    fi
+    
+    # 5. 如果还是没找到，在所有数据集目录的版本目录中搜索匹配的采样器检查点（跨数据集查找）
+    if [ ${#ckpt_files[@]} -eq 0 ]; then
+        echo "在当前数据集目录未找到检查点，尝试在所有数据集目录的版本目录中搜索..."
+        # 搜索所有数据集目录的版本目录
+        for dir in ./results/*/model_cpk/${version}; do
+            if [ -d "$dir" ]; then
+                found_files=($(ls -t "$dir"/*${sampler_name}*.ckpt 2>/dev/null))
+                if [ ${#found_files[@]} -gt 0 ]; then
+                    ckpt_files+=("${found_files[@]}")
+                    echo "  在 $dir 中找到 ${#found_files[@]} 个匹配的检查点"
+                fi
+            fi
+        done
+    fi
+    
+    # 如果找到了检查点，使用最新的
+    if [ ${#ckpt_files[@]} -gt 0 ]; then
+        ckpt_path=$(ls -t "${ckpt_files[@]}" 2>/dev/null | head -1)
+        ckpt_filename=$(basename "$ckpt_path")
+        echo "✓ 找到检查点: ${ckpt_filename}"
+        echo "  检查点路径: ${ckpt_path}"
+        # 使用环境变量传递检查点路径，避免 Hydra 解析路径中的特殊字符
+        export LEVER_LM_CHECKPOINT_PATH="${ckpt_path}"
+    else
+        echo "警告: 在所有数据集目录中未找到匹配的检查点文件"
+        echo "查找模式: ${checkpoint_filename_pattern}*.ckpt 或 *${sampler_name}*.ckpt"
+        echo "将使用默认的检查点查找逻辑（基于 ex_name）"
+        unset LEVER_LM_CHECKPOINT_PATH
+    fi
 fi
 
 run_inference() {
@@ -217,6 +271,7 @@ run_inference() {
     
     # 清理环境变量
     unset LEVER_LM_CHECKPOINT_PATH
+    unset LEVER_LM_CHECKPOINT_VERSION
 }
 
 run_inference

@@ -1,6 +1,20 @@
 import json
 import os
+import sys
 import uuid
+import importlib.util
+
+# 直接加载根目录的 utils.py，避免模块名冲突
+_root_dir = os.path.dirname(os.path.abspath(__file__))
+_utils_path = os.path.join(_root_dir, "utils.py")
+_spec = importlib.util.spec_from_file_location("root_utils", _utils_path)
+root_utils = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(root_utils)
+
+get_lever_lm_path = root_utils.get_lever_lm_path
+init_lever_lm = root_utils.init_lever_lm
+load_ds = root_utils.load_ds
+vqa_postprocess = root_utils.vqa_postprocess
 
 import hydra
 import torch
@@ -12,7 +26,6 @@ from tqdm import tqdm
 from lever_lm.utils import init_interface
 from open_mmicl.metrics.vqa_metrics import compute_vqa_accuracy
 from open_mmicl.retriever import LeverLMRetriever
-from utils import get_lever_lm_path, init_lever_lm, load_ds, vqa_postprocess
 
 
 @hydra.main(version_base=None, config_path="./configs", config_name="inference.yaml")

@@ -1,6 +1,12 @@
 import json
 import os
+import sys
 from functools import partial
+
+# 确保根目录在sys.path最前面，以正确导入根目录的utils.py
+_root_dir = os.path.dirname(os.path.abspath(__file__))
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
 
 import hydra
 import pytorch_lightning as pl
@@ -18,7 +24,13 @@ from torch.utils.data import DataLoader
 from transformers import CLIPProcessor, get_cosine_schedule_with_warmup
 
 from lever_lm.utils import data_split, collate_fn
-from utils import load_ds
+
+# 从根目录的utils.py导入
+import importlib.util
+_utils_spec = importlib.util.spec_from_file_location("root_utils", os.path.join(_root_dir, "utils.py"))
+_root_utils = importlib.util.module_from_spec(_utils_spec)
+_utils_spec.loader.exec_module(_root_utils)
+load_ds = _root_utils.load_ds
 
 
 # LoRA checkpoint 保存回调

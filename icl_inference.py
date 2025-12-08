@@ -19,14 +19,20 @@ from lever_lm.utils import init_interface
 from open_mmicl.metrics.cider_calculator import compute_cider
 from open_mmicl.metrics.vqa_metrics import compute_vqa_accuracy
 from open_mmicl.retriever import *
-from utils import (
-    caption_postprocess,
-    get_lever_lm_path,
-    init_lever_lm,
-    load_ds,
-    parse_checkpoint_filename,
-    vqa_postprocess,
-)
+
+# 导入根目录的utils.py（避免与lever_lm/utils/冲突）
+import importlib.util
+import os as _os
+_utils_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'utils.py')
+_spec = importlib.util.spec_from_file_location("root_utils", _utils_path)
+_root_utils = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_root_utils)
+caption_postprocess = _root_utils.caption_postprocess
+get_lever_lm_path = _root_utils.get_lever_lm_path
+init_lever_lm = _root_utils.init_lever_lm
+load_ds = _root_utils.load_ds
+parse_checkpoint_filename = _root_utils.parse_checkpoint_filename
+vqa_postprocess = _root_utils.vqa_postprocess
 
 
 def record(result_json_path: str, new_data: dict):

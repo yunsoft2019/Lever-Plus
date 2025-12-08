@@ -414,6 +414,79 @@ def get_lever_lm_path(cfg):
 
 
 def init_lever_lm(cfg, lever_lm_path):
+    # 检查是否是 v3 GRPO checkpoint（.pt 格式）
+    import os
+    is_v3_checkpoint = (
+        os.getenv("LEVER_LM_CHECKPOINT_VERSION") == "v3" or
+        lever_lm_path.endswith(".pt") and ("grpo" in lever_lm_path or "rce" in lever_lm_path)
+    )
+    
+    if is_v3_checkpoint:
+        # v3 GRPO checkpoint 使用特殊的加载方式
+        logger.info(f"检测到 v3 GRPO checkpoint，使用 v3 加载方式: {lever_lm_path}")
+        from lever_lm.models.v3 import load_v3_from_grpo_checkpoint
+        from lever_lm.models.adapter import PointerSelectorAdapter
+        
+        # 获取设备
+        device = cfg.device if hasattr(cfg, 'device') and cfg.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(device, str):
+            device = torch.device(device)
+        
+        # 加载 v3 模型（返回 PointerSelectorV3）
+        pointer_selector = load_v3_from_grpo_checkpoint(lever_lm_path, device=device)
+        
+        # 获取配置参数
+        clip_name = cfg.train.lever_lm.clip_name
+        
+        # 从配置中获取 encoding flags
+        query_encoding_flag = cfg.train.lever_lm.get('query_encoding_flag', ['image', 'text'])
+        if isinstance(query_encoding_flag, (list, tuple)) and len(query_encoding_flag) > 0:
+            # 已经是列表格式，直接使用
+            pass
+        else:
+            # 尝试从 lever_lm_ds 推断
+            query_encoding_flag = []
+            if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('query_image_field'):
+                query_encoding_flag.append('image')
+            if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('query_text_field'):
+                query_encoding_flag.append('text')
+            if not query_encoding_flag:
+                query_encoding_flag = ['image', 'text']  # 默认值
+        
+        icd_encoding_flag = cfg.train.lever_lm.get('icd_encoding_flag', ['image', 'text'])
+        if isinstance(icd_encoding_flag, (list, tuple)) and len(icd_encoding_flag) > 0:
+            # 已经是列表格式，直接使用
+            pass
+        else:
+            # 尝试从 lever_lm_ds 推断
+            icd_encoding_flag = []
+            if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('icd_image_field'):
+                icd_encoding_flag.append('image')
+            if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('icd_text_field'):
+                icd_encoding_flag.append('text')
+            if not icd_encoding_flag:
+                icd_encoding_flag = ['image', 'text']  # 默认值
+        
+        adapter = cfg.train.lever_lm.get('adapter', False)
+        norm = cfg.train.lever_lm.get('norm', True)
+        K = pointer_selector.K
+        
+        # 包装为 PointerSelectorAdapter（提供 generation 方法）
+        lever_lm = PointerSelectorAdapter(
+            pointer_selector_model=pointer_selector,
+            clip_name=clip_name,
+            query_encoding_flag=query_encoding_flag,
+            icd_encoding_flag=icd_encoding_flag,
+            adapter=adapter,
+            norm=norm,
+            K=K,
+            device=device
+        )
+        
+        processor = AutoProcessor.from_pretrained(clip_name)
+        return lever_lm, processor
+    
+    # v0, v1, v2, v2_lora 使用 PyTorch Lightning 格式的 checkpoint
     # PyTorch 2.6+ 默认 weights_only=True，需要设置为 False 来加载包含 omegaconf 对象的检查点
     checkpoint = torch.load(lever_lm_path, weights_only=False)
     

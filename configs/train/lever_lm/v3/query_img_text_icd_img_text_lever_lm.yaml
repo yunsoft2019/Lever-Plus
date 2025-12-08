@@ -12,7 +12,10 @@ config:
   num_heads: 1
   attn_dropout: 0.1
   num_layers: 3
-  # V3 特有参数（离线强化学习）
+  # V3新增参数（用于GRPO训练，推理时不需要，但保留以兼容）
+  clip_epsilon: 0.2
+  kl_beta: 0.1
+  advantage_clip: 5.0
 
 # 适配器参数
 clip_name: openai/clip-vit-base-patch32
@@ -20,14 +23,3 @@ query_encoding_flag: ['image', 'text']
 icd_encoding_flag: ['image', 'text']
 adapter: false
 norm: true
-cache_dir: null  # CLIP 模型缓存目录（可选），null 时使用默认缓存目录 ~/.cache/huggingface/
-
-# LoRA 配置
-use_lora: false  # 是否使用 LoRA 解冻 CLIP
-lora_config:  # LoRA 配置参数（仅在 use_lora=true 时生效）
-  r: 16  # LoRA rank
-  lora_alpha: 32  # LoRA alpha
-  target_modules: ['q_proj', 'v_proj', 'k_proj', 'out_proj']  # 目标模块（CLIP 的注意力层）
-  lora_dropout: 0.1  # LoRA dropout
-  bias: 'none'  # bias 处理方式
-
