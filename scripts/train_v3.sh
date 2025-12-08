@@ -91,7 +91,8 @@ checkpoint_filename="${model_name_safe}_${sampler_name}_infoscore_left_beam5_sho
 query_emb_path="./results/${dataset_name}/cache/query_embeddings.pt"
 cand_emb_path="./results/${dataset_name}/cache/candidate_embeddings.pt"
 rl_data_path="./results/${dataset_name}/generated_data/rl_data_${sampler_name}.json"
-output_dir="./results/${dataset_name}/model_cpk/v3_1layer"
+# 每个采样器使用独立的输出目录，避免覆盖
+output_dir="./results/${dataset_name}/model_cpk/v3_${sampler_name}"
 
 # 查找 v2 checkpoint
 v2_ckpt_path="./results/${dataset_name}/model_cpk/v2/${checkpoint_filename}_best.ckpt"
