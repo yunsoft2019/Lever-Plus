@@ -7,3 +7,4 @@ nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,processes.
 echo "=========================================="
 echo ""
 echo "推荐使用内存使用率 < 50% 的 GPU"
+

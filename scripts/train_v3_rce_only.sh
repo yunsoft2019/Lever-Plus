@@ -37,3 +37,4 @@ export REWARD_BETA=0.8
 
 # 执行训练
 bash scripts/train_lever_lm.sh vqa okvqa_local ${gpu_id} query_img_text_icd_img_text ${sampler} qwen2.5_vl_3B v3
+
