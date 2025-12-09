@@ -450,6 +450,18 @@ class RLBeamDatasetWithEmbedding(Dataset):
         if reward_mode == "hard_plus_soft":
             print(f"  - hard_weight: {hard_weight}, soft_weight: {soft_weight}")
             print(f"  - reward 范围: [0, {hard_weight + soft_weight}]（正样本 [{hard_weight}, {hard_weight + soft_weight}]，负样本 [0, {hard_weight})）")
+        elif reward_mode == "hard_plus_soft_v2":
+            print(f"  - hard_weight: {hard_weight}, soft_weight: {soft_weight}")
+            print(f"  - reward 范围: [0, {soft_weight + 2*hard_weight}]（正样本 [{2*hard_weight}, {soft_weight + 2*hard_weight}]，负样本 [0, {soft_weight})）")
+            print(f"  - 增大正负样本差距")
+        elif reward_mode == "separated":
+            print(f"  - hard_weight: {hard_weight}, soft_weight: {soft_weight}")
+            print(f"  - 正样本 reward: [{2*hard_weight}, {2*hard_weight + soft_weight}]")
+            print(f"  - 负样本 reward: [0, {soft_weight}]")
+            print(f"  - 【推荐】阈值分离，正负样本有明确 gap（至少 {2*hard_weight - soft_weight}）")
+        elif reward_mode == "hybrid":
+            print(f"  - 混合 InfoScore 和 correctness")
+            print(f"  - hard_weight 作为 InfoScore 权重: {hard_weight}")
         elif reward_mode == "legacy":
             print(f"  - reward_alpha: {reward_alpha}, reward_beta: {reward_beta}")
             print(f"  - reward_correctness_mode: {reward_correctness_mode}")

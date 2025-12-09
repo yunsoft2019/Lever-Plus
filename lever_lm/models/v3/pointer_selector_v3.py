@@ -180,7 +180,8 @@ class PointerSelectorV3(PointerSelectorV2):
         self,
         rewards: torch.Tensor,
         normalize: bool = True,
-        use_rank: bool = True
+        use_rank: bool = False,
+        min_std: float = 0.1
     ) -> torch.Tensor:
         """
         计算组内相对优势（Group-Relative Advantage）
@@ -194,15 +195,17 @@ class PointerSelectorV3(PointerSelectorV2):
         - 组内Z-score：在每个query的5个beam内计算均值和标准差
         - 优势裁剪：限制在[-5, 5]范围内，防止极端梯度
         
-        【修复】当reward差异极小时，使用基于排名的归一化：
-        - 将reward转换为排名分数 [0, 1]
-        - 然后映射到 [-1, 1] 范围
-        - 这样即使原始reward差异很小，也能产生有意义的advantage
+        【优化】默认使用 Z-score 归一化而非排名归一化：
+        - 排名归一化会丢失原始 reward 的绝对差异信息
+        - 当所有候选都是负样本时，排名归一化仍会产生 [-1, 1] 的 advantage
+        - Z-score 归一化保留了 reward 的相对大小关系
+        - 设置 min_std 避免除零，同时保证有意义的 advantage
         
         Args:
             rewards: [B, num_beams] 每个beam的奖励（分数）
             normalize: 是否进行组内Z-score归一化
-            use_rank: 当reward差异太小时，使用基于排名的归一化
+            use_rank: 是否使用基于排名的归一化（默认 False）
+            min_std: Z-score 归一化时的最小标准差（默认 0.1）
         
         Returns:
             advantages: [B, num_beams] 组内相对优势
@@ -210,11 +213,7 @@ class PointerSelectorV3(PointerSelectorV2):
         batch_size, num_beams = rewards.shape
         
         if use_rank:
-            # 【修复】始终使用基于排名的归一化
-            # 原因：infoscore等评分机制产生的reward差异通常很小
-            # Z-score归一化后advantage仍然接近0，无法提供有效的学习信号
-            # 排名归一化可以保证advantage在[-1, 1]范围内有意义
-            
+            # 基于排名的归一化（可选，适用于 reward 差异极小的情况）
             # 获取排名（降序，最高reward排名为0）
             ranks = rewards.argsort(dim=-1, descending=True).argsort(dim=-1).float()
             # 归一化到 [-1, 1]
@@ -224,14 +223,17 @@ class PointerSelectorV3(PointerSelectorV2):
             else:
                 advantages = torch.zeros_like(ranks)
         else:
-            # 原始Z-score逻辑（保留作为备选）
+            # 【推荐】Z-score 归一化
+            # 保留原始 reward 的绝对差异信息
+            mean = rewards.mean(dim=-1, keepdim=True)
+            
             if normalize:
-                mean = rewards.mean(dim=-1, keepdim=True)
                 std = rewards.std(dim=-1, keepdim=True)
-                std = torch.clamp(std, min=1e-8)
+                # 设置最小 std，避免除零，同时保证有意义的 advantage
+                std = torch.clamp(std, min=min_std)
                 advantages = (rewards - mean) / std
             else:
-                mean = rewards.mean(dim=-1, keepdim=True)
+                # 不归一化，只减去均值
                 advantages = rewards - mean
         
         # 优势裁剪：限制在[-advantage_clip, advantage_clip]范围内
@@ -276,7 +278,7 @@ class PointerSelectorV3(PointerSelectorV2):
         beam_labels: torch.Tensor,
         beam_rewards: torch.Tensor,
         temperature: float = 1.0,
-        use_rank_normalization: bool = True,
+        use_rank_normalization: bool = False,
         use_top1_only: bool = False
     ) -> torch.Tensor:
         """
@@ -287,9 +289,10 @@ class PointerSelectorV3(PointerSelectorV2):
         - 损失：L_RCE = Σ w_i * CE(π_new, labels_i)
         - 其中 w_i = softmax(score_i / τ)
         
-        【修复】使用排名归一化解决InfoScore分数差异过小的问题
-        - 问题：InfoScore分数差异~1e-8，导致softmax权重均匀
-        - 方案：将分数转换为排名，排名差异始终有意义
+        【优化】默认关闭排名归一化：
+        - 当使用 hard_plus_soft_v2 等 reward 模式时，reward 差异足够大
+        - 排名归一化会丢失 reward 的绝对差异信息
+        - 直接使用 reward 计算 softmax 权重更合理
         
         Args:
             query_emb: [B, d] query embedding
@@ -297,7 +300,7 @@ class PointerSelectorV3(PointerSelectorV2):
             beam_labels: [B, num_beams, S] 多个beam的标签序列
             beam_rewards: [B, num_beams] 每个beam的奖励（原始分数，未归一化）
             temperature: 温度参数τ（从2.0线性降到0.5）
-            use_rank_normalization: 是否使用排名归一化（默认True，解决分数差异过小问题）
+            use_rank_normalization: 是否使用排名归一化（默认False）
             use_top1_only: 是否只使用Top-1 beam（回归V2监督学习方式）
         
         Returns:

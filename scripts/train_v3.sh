@@ -24,9 +24,10 @@
 #   GRPO_LR: GRPO 学习率（默认: 1e-5）
 #   KL_BETA: KL 散度权重（默认: 0.1）
 #   NUM_LAYERS: Cross-Attention 层数（默认: 1，与 v2 一致）
-#   REWARD_MODE: Reward 模式（默认: hard_plus_soft，可选: hard_only, soft_only, legacy）
+#   REWARD_MODE: Reward 模式（默认: separated，可选: hard_plus_soft, hard_plus_soft_v2, hard_only, soft_only, hybrid, legacy）
 #   HARD_WEIGHT: Hard correctness 权重（默认: 1.0）
 #   SOFT_WEIGHT: Soft correctness 权重（默认: 1.0）
+#   USE_RANK_ADVANTAGE: 是否使用排名归一化计算 advantage（默认: false）
 
 set -e
 
@@ -136,8 +137,8 @@ rce_lr=${RCE_LR:-1e-4}
 grpo_lr=${GRPO_LR:-1e-5}
 kl_beta=${KL_BETA:-0.1}
 num_layers=${NUM_LAYERS:-1}
-# 新的 Reward 参数
-reward_mode=${REWARD_MODE:-hard_plus_soft}
+# 新的 Reward 参数（推荐使用 separated，正负样本有明确 gap）
+reward_mode=${REWARD_MODE:-separated}
 hard_weight=${HARD_WEIGHT:-1.0}
 soft_weight=${SOFT_WEIGHT:-1.0}
 

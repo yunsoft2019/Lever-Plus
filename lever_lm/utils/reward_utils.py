@@ -240,13 +240,16 @@ def compute_reward_for_candidate(
     - 正样本：[1, 2]，负样本：[0, 1)
     
     支持的 reward_mode：
-    - "hard_plus_soft": reward = hard + soft（默认，推荐）
+    - "hard_plus_soft": reward = hard + soft（默认）
+    - "hard_plus_soft_v2": reward = soft + 2*hard（增大正负样本差距）
+    - "separated": 阈值分离，正样本 [2,3]，负样本 [0,1]（推荐，正负样本有明确 gap）
     - "hard_only": reward = hard（只看是否答对）
     - "soft_only": reward = soft（只看准确率分数）
+    - "hybrid": 混合 InfoScore 和 correctness（需要 beam_score）
     - "legacy": 使用旧的 alpha/beta 组合方式（兼容旧代码）
     
     Args:
-        beam_score: beam search 分数（可选，legacy 模式使用）
+        beam_score: beam search 分数（可选，legacy/hybrid 模式使用）
         logprob_score: log 概率分数（可选，legacy 模式使用）
         vqa_correct: correctness (0/1)（可选）
         vqa_acc_score: VQA 准确率分数 [0,1]（可选）
@@ -271,6 +274,14 @@ def compute_reward_for_candidate(
         # 组合：reward ∈ [0, 2]
         reward = hard_weight * hard + soft_weight * soft
     
+    elif reward_mode == "hard_plus_soft_v2":
+        # 改进版：增大正负样本差距
+        # 正样本: [2, 3], 负样本: [0, 1]
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
+        # 正确性加成更大（2.0 而不是 1.0）
+        reward = soft_weight * soft + 2.0 * hard_weight * hard
+    
     elif reward_mode == "hard_only":
         # 只看是否答对
         hard = float(vqa_correct) if vqa_correct is not None else 0.0
@@ -280,6 +291,39 @@ def compute_reward_for_candidate(
         # 只看准确率分数
         soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
         reward = soft_weight * soft
+    
+    elif reward_mode == "separated":
+        # 【推荐】阈值分离：正负样本之间有明确的 gap
+        # 正样本：reward = 2.0 + soft，范围 [2.0, 3.0]
+        # 负样本：reward = soft，范围 [0.0, 1.0]
+        # 这样正负样本之间至少有 1.0 的差距
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
+        if hard == 1.0:
+            reward = 2.0 * hard_weight + soft_weight * soft  # 正样本 [2.0, 3.0]
+        else:
+            reward = soft_weight * soft  # 负样本 [0.0, 1.0]
+    
+    elif reward_mode == "hybrid":
+        # 混合 InfoScore 和 correctness
+        # 适用于同时有 beam_score 和 correctness 的场景
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
+        info_score = float(beam_score) if beam_score is not None else 0.0
+        
+        # 归一化 info_score（假设范围 [-0.1, 0.1]，映射到 [0, 1]）
+        info_normalized = (info_score + 0.1) / 0.2
+        info_normalized = max(0.0, min(1.0, info_normalized))
+        
+        # correctness 部分（使用分离设计）
+        if hard == 1.0:
+            correct_reward = 2.0 + soft  # 正样本 [2.0, 3.0]
+        else:
+            correct_reward = soft  # 负样本 [0.0, 1.0]
+        
+        # 混合：hard_weight 作为 info_score 的权重
+        alpha_mix = min(1.0, max(0.0, hard_weight))
+        reward = alpha_mix * info_normalized + (1.0 - alpha_mix) * correct_reward
     
     elif reward_mode == "legacy":
         # 兼容旧的 alpha/beta 组合方式
