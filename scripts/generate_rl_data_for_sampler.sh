@@ -68,7 +68,8 @@ esac
 # 构建文件路径
 beam_data_file="${task}-${dataset_name}-${model_name}-${sampler_name}-scorer:infoscore-construct_order:left-beam_size:5-max_shot:2-candidate_num:64-sample_num:${sample_num}.json"
 beam_data_path="./results/${dataset_name}/generated_data/${beam_data_file}"
-rl_data_path="./results/${dataset_name}/generated_data/rl_data_${sampler_name}.json"
+# RL 数据路径：按 sampler 和 beam_model 分开保存，避免覆盖
+rl_data_path="./results/${dataset_name}/generated_data/rl_data_${sampler_name}_${model_name}.json"
 query_emb_path="./results/${dataset_name}/cache/query_embeddings.pt"
 cand_emb_path="./results/${dataset_name}/cache/candidate_embeddings.pt"
 

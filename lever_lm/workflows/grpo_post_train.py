@@ -435,11 +435,17 @@ def main():
     parser.add_argument("--kl_beta", type=float, default=0.1, help="KL散度权重（越大越保守）")
     parser.add_argument("--device", type=str, default="cuda:0", help="设备")
     parser.add_argument("--use_top1_only", action="store_true", help="只使用Top-1 beam训练（回归V2监督学习方式）")
-    # Reward参数（用于新格式数据）
-    parser.add_argument("--reward_alpha", type=float, default=0.2, help="Quality权重（用于新格式数据）")
-    parser.add_argument("--reward_beta", type=float, default=1.0, help="Correctness权重（用于新格式数据）")
-    parser.add_argument("--reward_correctness_mode", type=str, default="pm1", choices=["01", "pm1"], help="Correctness模式：'01'或'pm1'（用于新格式数据）")
-    parser.add_argument("--use_logprob", action="store_true", help="使用logprob_score而非beam_score（用于新格式数据）")
+    # 新的 Reward 参数（推荐使用）
+    parser.add_argument("--reward_mode", type=str, default="hard_plus_soft", 
+                        choices=["hard_plus_soft", "hard_only", "soft_only", "legacy"],
+                        help="Reward模式：hard_plus_soft（推荐）、hard_only、soft_only、legacy")
+    parser.add_argument("--hard_weight", type=float, default=1.0, help="Hard correctness权重（默认1.0）")
+    parser.add_argument("--soft_weight", type=float, default=1.0, help="Soft correctness权重（默认1.0）")
+    # 兼容旧的 Reward 参数（legacy 模式使用）
+    parser.add_argument("--reward_alpha", type=float, default=0.0, help="Quality权重（legacy模式，默认0.0）")
+    parser.add_argument("--reward_beta", type=float, default=0.0, help="Correctness权重（legacy模式，默认0.0）")
+    parser.add_argument("--reward_correctness_mode", type=str, default="01", choices=["01", "pm1"], help="Correctness模式（legacy模式）")
+    parser.add_argument("--use_logprob", action="store_true", help="使用logprob_score而非beam_score（legacy模式）")
     parser.add_argument("--num_layers", type=int, default=1, help="Cross-Attention层数（默认1，与v2一致）")
     args = parser.parse_args()
     
@@ -543,6 +549,11 @@ def main():
             candidate_indices=candidate_indices,
             shot_num=shot_num,
             normalize_rewards=True,
+            # 新的 reward 参数
+            reward_mode=args.reward_mode,
+            hard_weight=args.hard_weight,
+            soft_weight=args.soft_weight,
+            # 兼容旧接口的参数
             reward_alpha=args.reward_alpha,
             reward_beta=args.reward_beta,
             reward_correctness_mode=args.reward_correctness_mode,
@@ -555,6 +566,11 @@ def main():
             candidate_indices=candidate_indices,
             shot_num=shot_num,
             normalize_rewards=True,
+            # 新的 reward 参数
+            reward_mode=args.reward_mode,
+            hard_weight=args.hard_weight,
+            soft_weight=args.soft_weight,
+            # 兼容旧接口的参数
             reward_alpha=args.reward_alpha,
             reward_beta=args.reward_beta,
             reward_correctness_mode=args.reward_correctness_mode,

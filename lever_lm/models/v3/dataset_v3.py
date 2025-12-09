@@ -319,10 +319,11 @@ class RLBeamDatasetWithEmbedding(Dataset):
     """
     RL Beam数据集：支持新的数据格式（包含 pointer_candidates 和 correctness）
     
-    按照强化学习.md §2.1 和 §4.2 实现：
+    按照 v3_rl_from_current_code_full_plan.md 实现：
     - 支持新的 pointer_candidates 格式
     - 支持 vqa_correct 和 vqa_acc_score 字段
-    - 使用 compute_reward_for_candidate() 计算组合 reward
+    - 使用新的 reward 公式：reward = hard + soft = vqa_correct + vqa_acc_score
+    - 正样本：[1, 2]，负样本：[0, 1)
     """
     
     def __init__(
@@ -333,9 +334,14 @@ class RLBeamDatasetWithEmbedding(Dataset):
         candidate_indices: List[int],
         shot_num: int = 2,
         normalize_rewards: bool = True,
-        reward_alpha: float = 0.2,
-        reward_beta: float = 1.0,
-        reward_correctness_mode: str = "pm1",
+        # 新的 reward 参数
+        reward_mode: str = "hard_plus_soft",
+        hard_weight: float = 1.0,
+        soft_weight: float = 1.0,
+        # 兼容旧接口的参数（默认不启用）
+        reward_alpha: float = 0.0,
+        reward_beta: float = 0.0,
+        reward_correctness_mode: str = "01",
         use_logprob: bool = False,
         filter_gen_methods: Optional[List[str]] = None
     ):
@@ -349,16 +355,26 @@ class RLBeamDatasetWithEmbedding(Dataset):
             candidate_indices: candidate索引列表，用于映射
             shot_num: shot数量
             normalize_rewards: 是否归一化奖励
-            reward_alpha: quality权重（默认0.2）
-            reward_beta: correctness权重（默认1.0）
-            reward_correctness_mode: correctness模式，"01" 或 "pm1"（默认"pm1"）
-            use_logprob: 是否使用 logprob_score 而非 beam_score
+            reward_mode: reward 模式（默认 "hard_plus_soft"）
+                - "hard_plus_soft": reward = hard + soft（推荐）
+                - "hard_only": reward = hard
+                - "soft_only": reward = soft
+                - "legacy": 使用旧的 alpha/beta 组合方式
+            hard_weight: hard correctness 权重（默认 1.0）
+            soft_weight: soft correctness 权重（默认 1.0）
+            reward_alpha: quality权重（legacy 模式，默认 0.0）
+            reward_beta: correctness权重（legacy 模式，默认 0.0）
+            reward_correctness_mode: correctness模式（legacy 模式，"01" 或 "pm1"）
+            use_logprob: 是否使用 logprob_score（legacy 模式）
             filter_gen_methods: 过滤的生成方法列表（如 ["beam", "sample"]），None表示不过滤
         """
         Dataset.__init__(self)
         
         self.shot_num = shot_num
         self.normalize_rewards = normalize_rewards
+        self.reward_mode = reward_mode
+        self.hard_weight = hard_weight
+        self.soft_weight = soft_weight
         self.reward_alpha = reward_alpha
         self.reward_beta = reward_beta
         self.reward_correctness_mode = reward_correctness_mode
@@ -400,12 +416,15 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 mapped_pointer = [self.cand_idx_to_pos.get(idx, idx) for idx in pointer]
                 beam_labels.append(mapped_pointer)
                 
-                # 计算组合reward
+                # 计算组合reward（使用新的 reward_mode）
                 reward = compute_reward_for_candidate(
                     beam_score=c.get("beam_score"),
                     logprob_score=c.get("logprob_score"),
                     vqa_correct=c.get("vqa_correct"),
                     vqa_acc_score=c.get("vqa_acc_score"),
+                    reward_mode=self.reward_mode,
+                    hard_weight=self.hard_weight,
+                    soft_weight=self.soft_weight,
                     alpha=self.reward_alpha,
                     beta=self.reward_beta,
                     correctness_mode=self.reward_correctness_mode,
@@ -427,8 +446,13 @@ class RLBeamDatasetWithEmbedding(Dataset):
         print(f"  - 样本数: {len(self.samples)}")
         print(f"  - query_embeddings: {query_embeddings.shape}")
         print(f"  - candidate_embeddings: {candidate_embeddings.shape}")
-        print(f"  - reward_alpha: {reward_alpha}, reward_beta: {reward_beta}")
-        print(f"  - reward_correctness_mode: {reward_correctness_mode}")
+        print(f"  - reward_mode: {reward_mode}")
+        if reward_mode == "hard_plus_soft":
+            print(f"  - hard_weight: {hard_weight}, soft_weight: {soft_weight}")
+            print(f"  - reward 范围: [0, {hard_weight + soft_weight}]（正样本 [{hard_weight}, {hard_weight + soft_weight}]，负样本 [0, {hard_weight})）")
+        elif reward_mode == "legacy":
+            print(f"  - reward_alpha: {reward_alpha}, reward_beta: {reward_beta}")
+            print(f"  - reward_correctness_mode: {reward_correctness_mode}")
         if self.filter_gen_methods:
             print(f"  - 过滤生成方法: {self.filter_gen_methods}")
     

@@ -220,64 +220,99 @@ def compute_reward_for_candidate(
     logprob_score: Optional[float] = None,
     vqa_correct: Optional[int] = None,
     vqa_acc_score: Optional[float] = None,
-    alpha: float = 0.2,
-    beta: float = 1.0,
-    correctness_mode: str = "pm1",
+    # 新增：reward 模式参数
+    reward_mode: str = "hard_plus_soft",
+    hard_weight: float = 1.0,
+    soft_weight: float = 1.0,
+    # 兼容旧接口的参数（默认不启用）
+    alpha: float = 0.0,
+    beta: float = 0.0,
+    correctness_mode: str = "01",
     use_logprob: bool = False,
     reward_clip: Tuple[float, float] = (-5.0, 5.0)
 ) -> float:
     """
-    计算组合 reward（beam_score / logprob_score + correctness）
+    计算 RL reward
     
-    按照强化学习.md §3.4 实现：
-    - correctness 部分：0/1 或 +1/-1
-    - quality 部分：beam_score 或 logprob_score
-    - 线性组合：reward = α * quality + β * correctness_val
+    新方案（v3_rl_from_current_code_full_plan.md）：
+    - 只使用 vqa_correct / vqa_acc_score 构造 reward
+    - reward = hard_weight * hard + soft_weight * soft
+    - 正样本：[1, 2]，负样本：[0, 1)
+    
+    支持的 reward_mode：
+    - "hard_plus_soft": reward = hard + soft（默认，推荐）
+    - "hard_only": reward = hard（只看是否答对）
+    - "soft_only": reward = soft（只看准确率分数）
+    - "legacy": 使用旧的 alpha/beta 组合方式（兼容旧代码）
     
     Args:
-        beam_score: beam search 分数（可选）
-        logprob_score: log 概率分数（可选）
+        beam_score: beam search 分数（可选，legacy 模式使用）
+        logprob_score: log 概率分数（可选，legacy 模式使用）
         vqa_correct: correctness (0/1)（可选）
         vqa_acc_score: VQA 准确率分数 [0,1]（可选）
-        alpha: quality 权重（默认0.2）
-        beta: correctness 权重（默认1.0）
-        correctness_mode: correctness 模式，"01" 或 "pm1"（默认"pm1"）
-        use_logprob: 是否使用 logprob_score 而非 beam_score
-        reward_clip: reward 裁剪范围（默认[-5, 5]）
+        reward_mode: reward 模式（默认 "hard_plus_soft"）
+        hard_weight: hard correctness 权重（默认 1.0）
+        soft_weight: soft correctness 权重（默认 1.0）
+        alpha: quality 权重（legacy 模式，默认 0.0）
+        beta: correctness 权重（legacy 模式，默认 0.0）
+        correctness_mode: correctness 模式（legacy 模式，"01" 或 "pm1"）
+        use_logprob: 是否使用 logprob_score（legacy 模式）
+        reward_clip: reward 裁剪范围（默认 [-5, 5]）
     
     Returns:
-        reward: 组合后的 reward（已裁剪）
+        reward: 计算后的 reward（已裁剪）
     """
-    # correctness 部分
-    if correctness_mode == "01":
-        # 0/1 模式：正确=1，错误=0
-        if vqa_correct is not None:
-            correctness_val = float(vqa_correct)
-        elif vqa_acc_score is not None:
-            correctness_val = float(vqa_acc_score)
-        else:
-            correctness_val = 0.0
-    else:
-        # pm1 模式：正确=+1，错误=-1
-        if vqa_correct is not None:
-            correctness_val = 2.0 * float(vqa_correct) - 1.0
-        elif vqa_acc_score is not None:
-            # 将 [0,1] 映射到 [-1, 1]
-            correctness_val = 2.0 * float(vqa_acc_score) - 1.0
-        else:
-            correctness_val = 0.0
+    # 新方案：基于 hard + soft correctness
+    if reward_mode == "hard_plus_soft":
+        # hard: 0/1 correctness
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        # soft: VQA 准确率分数 [0,1]
+        soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
+        # 组合：reward ∈ [0, 2]
+        reward = hard_weight * hard + soft_weight * soft
     
-    # quality 部分：可以选 beam_score 或 logprob_score
-    if use_logprob and logprob_score is not None:
-        # logprob 越大越好，因此取负号（或直接使用，取决于你的分数定义）
-        quality = -logprob_score  # 假设 logprob 是负数，越大越好
-    elif beam_score is not None:
-        quality = float(beam_score)
-    else:
-        quality = 0.0
+    elif reward_mode == "hard_only":
+        # 只看是否答对
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        reward = hard_weight * hard
     
-    # 线性组合
-    reward = alpha * quality + beta * correctness_val
+    elif reward_mode == "soft_only":
+        # 只看准确率分数
+        soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
+        reward = soft_weight * soft
+    
+    elif reward_mode == "legacy":
+        # 兼容旧的 alpha/beta 组合方式
+        # correctness 部分
+        if correctness_mode == "01":
+            if vqa_correct is not None:
+                correctness_val = float(vqa_correct)
+            elif vqa_acc_score is not None:
+                correctness_val = float(vqa_acc_score)
+            else:
+                correctness_val = 0.0
+        else:
+            # pm1 模式：正确=+1，错误=-1
+            if vqa_correct is not None:
+                correctness_val = 2.0 * float(vqa_correct) - 1.0
+            elif vqa_acc_score is not None:
+                correctness_val = 2.0 * float(vqa_acc_score) - 1.0
+            else:
+                correctness_val = 0.0
+        
+        # quality 部分
+        if use_logprob and logprob_score is not None:
+            quality = -logprob_score
+        elif beam_score is not None:
+            quality = float(beam_score)
+        else:
+            quality = 0.0
+        
+        # 线性组合
+        reward = alpha * quality + beta * correctness_val
+    
+    else:
+        raise ValueError(f"Unknown reward_mode: {reward_mode}")
     
     # 裁剪
     reward = max(reward_clip[0], min(reward_clip[1], reward))
