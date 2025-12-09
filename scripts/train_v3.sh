@@ -18,16 +18,20 @@
 #
 # 环境变量（可选，用于自定义训练参数）:
 #   RCE_EPOCHS: RCE 预热轮数（默认: 5）
-#   GRPO_EPOCHS: GRPO 训练轮数（默认: 10）
+#   GRPO_EPOCHS: GRPO 训练轮数（默认: 1，文档建议先做 RCE-only baseline，设为 0）
 #   BATCH_SIZE: 批次大小（默认: 1）
 #   RCE_LR: RCE 学习率（默认: 1e-4）
-#   GRPO_LR: GRPO 学习率（默认: 1e-5）
-#   KL_BETA: KL 散度权重（默认: 0.1）
+#   GRPO_LR: GRPO 学习率（默认: 5e-6，轻量 GRPO）
+#   KL_BETA: KL 散度权重（默认: 0.15，稍强的 KL 约束）
 #   NUM_LAYERS: Cross-Attention 层数（默认: 1，与 v2 一致）
-#   REWARD_MODE: Reward 模式（默认: separated，可选: hard_plus_soft, hard_plus_soft_v2, hard_only, soft_only, hybrid, legacy）
+#   REWARD_MODE: Reward 模式（默认: hard_plus_soft，符合文档推荐）
 #   HARD_WEIGHT: Hard correctness 权重（默认: 1.0）
 #   SOFT_WEIGHT: Soft correctness 权重（默认: 1.0）
 #   USE_RANK_ADVANTAGE: 是否使用排名归一化计算 advantage（默认: false）
+#
+# 实验路线（根据 LeverPlus_v3_RL_plan_cn.md）:
+#   Step 3 (RCE-only baseline): export GRPO_EPOCHS=0 && bash scripts/train_v3.sh ...
+#   Step 4 (RCE + 轻量 GRPO): export GRPO_EPOCHS=1 GRPO_LR=5e-6 KL_BETA=0.15 && bash scripts/train_v3.sh ...
 
 set -e
 
@@ -130,15 +134,16 @@ if [ ! -f "$v2_ckpt_path" ]; then
 fi
 
 # 设置默认训练参数（可通过环境变量覆盖）
+# 根据文档实验路线，默认先做 RCE-only baseline（GRPO_EPOCHS=0）
 rce_epochs=${RCE_EPOCHS:-5}
-grpo_epochs=${GRPO_EPOCHS:-10}
+grpo_epochs=${GRPO_EPOCHS:-0}  # 默认 0，先做 RCE-only baseline
 batch_size=${BATCH_SIZE:-1}
 rce_lr=${RCE_LR:-1e-4}
-grpo_lr=${GRPO_LR:-1e-5}
-kl_beta=${KL_BETA:-0.1}
+grpo_lr=${GRPO_LR:-5e-6}  # 轻量 GRPO 使用更小的学习率
+kl_beta=${KL_BETA:-0.15}  # 稍强的 KL 约束
 num_layers=${NUM_LAYERS:-1}
-# 新的 Reward 参数（推荐使用 separated，正负样本有明确 gap）
-reward_mode=${REWARD_MODE:-separated}
+# 新的 Reward 参数（根据文档推荐，使用 hard_plus_soft）
+reward_mode=${REWARD_MODE:-hard_plus_soft}
 hard_weight=${HARD_WEIGHT:-1.0}
 soft_weight=${SOFT_WEIGHT:-1.0}
 
@@ -154,6 +159,11 @@ echo "=========================================="
 echo "训练参数:"
 echo "  RCE Epochs: ${rce_epochs}"
 echo "  GRPO Epochs: ${grpo_epochs}"
+if [ "${grpo_epochs}" -eq 0 ]; then
+    echo "  → RCE-only baseline 模式（符合文档 Step 3 建议）"
+else
+    echo "  → RCE + GRPO 模式（符合文档 Step 4 建议）"
+fi
 echo "  Batch Size: ${batch_size}"
 echo "  RCE LR: ${rce_lr}"
 echo "  GRPO LR: ${grpo_lr}"

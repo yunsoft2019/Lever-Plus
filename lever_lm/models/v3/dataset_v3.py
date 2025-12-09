@@ -413,23 +413,46 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 assert len(pointer) == shot_num, f"pointer长度不匹配: {len(pointer)} vs {shot_num}"
                 
                 # 映射pointer中的索引为candidate位置
-                mapped_pointer = [self.cand_idx_to_pos.get(idx, idx) for idx in pointer]
+                # 严格检查：如果索引不在 candidate_indices 中，立即报错
+                mapped_pointer = []
+                for idx in pointer:
+                    if idx not in self.cand_idx_to_pos:
+                        raise KeyError(
+                            f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
+                            f"(query_id={query_id})"
+                        )
+                    mapped_pointer.append(self.cand_idx_to_pos[idx])
                 beam_labels.append(mapped_pointer)
                 
                 # 计算组合reward（使用新的 reward_mode）
-                reward = compute_reward_for_candidate(
-                    beam_score=c.get("beam_score"),
-                    logprob_score=c.get("logprob_score"),
-                    vqa_correct=c.get("vqa_correct"),
-                    vqa_acc_score=c.get("vqa_acc_score"),
-                    reward_mode=self.reward_mode,
-                    hard_weight=self.hard_weight,
-                    soft_weight=self.soft_weight,
-                    alpha=self.reward_alpha,
-                    beta=self.reward_beta,
-                    correctness_mode=self.reward_correctness_mode,
-                    use_logprob=self.use_logprob
-                )
+                # 根据文档要求：不要将 beam_score/logprob_score 混入 reward（除非 legacy 模式）
+                if self.reward_mode == "legacy":
+                    reward = compute_reward_for_candidate(
+                        beam_score=c.get("beam_score"),
+                        logprob_score=c.get("logprob_score"),
+                        vqa_correct=c.get("vqa_correct"),
+                        vqa_acc_score=c.get("vqa_acc_score"),
+                        reward_mode=self.reward_mode,
+                        hard_weight=self.hard_weight,
+                        soft_weight=self.soft_weight,
+                        alpha=self.reward_alpha,
+                        beta=self.reward_beta,
+                        correctness_mode=self.reward_correctness_mode,
+                        use_logprob=self.use_logprob
+                    )
+                else:
+                    # 非 legacy 模式：只传入 correctness 相关参数
+                    reward = compute_reward_for_candidate(
+                        vqa_correct=c.get("vqa_correct"),
+                        vqa_acc_score=c.get("vqa_acc_score"),
+                        reward_mode=self.reward_mode,
+                        hard_weight=self.hard_weight,
+                        soft_weight=self.soft_weight,
+                        alpha=self.reward_alpha,
+                        beta=self.reward_beta,
+                        correctness_mode=self.reward_correctness_mode,
+                        use_logprob=self.use_logprob
+                    )
                 beam_rewards.append(reward)
                 
                 # 保存logprob（用于old_log_probs）

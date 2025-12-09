@@ -28,6 +28,9 @@ import argparse
 import torch
 import os
 import tempfile
+import sys
+import contextlib
+from io import StringIO
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
@@ -38,7 +41,7 @@ from lever_lm.models.v3.rl_data_generation import (
 )
 from lever_lm.models.v3 import PointerSelectorV3
 from lever_lm.utils import init_interface
-from open_mmicl.metrics.vqa_metrics import compute_vqa_accuracy as compute_vqa_accuracy_metric
+from open_mmicl.metrics.vqa_metrics import compute_vqa_accuracy as compute_vqa_accuracy_metric, VQA, VQAEval
 
 # 导入根目录的utils.py（避免与lever_lm/utils/冲突）
 import importlib.util
@@ -263,8 +266,9 @@ def compute_vqa_accuracy(
     ground_truth_answers,
     question_id: Optional[str] = None,
     val_ques_path: Optional[str] = None,
-    val_ann_path: Optional[str] = None
-) -> Tuple[int, float]:
+    val_ann_path: Optional[str] = None,
+    vqa_cache: Optional[VQA] = None
+) -> Tuple[int, float, bool]:
     """
     计算 VQA 准确率
     
@@ -282,6 +286,7 @@ def compute_vqa_accuracy(
     Returns:
         correct: 0/1（是否正确）
         acc_score: float [0,1]（准确率分数）
+        used_file_metric: bool（是否使用了文件方式计算）
     """
     # 处理 ground_truth_answers：如果是字典列表，提取 answer 字段
     if ground_truth_answers and isinstance(ground_truth_answers[0], dict):
@@ -298,35 +303,75 @@ def compute_vqa_accuracy(
     # 如果提供了文件路径，使用文件方式计算（更准确）
     if val_ques_path and val_ann_path and question_id:
         try:
-            # 创建临时结果文件
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                temp_result_file = f.name
-                json.dump([{
-                    "answer": pred_answer,
-                    "question_id": question_id,
-                }], f, indent=4)
-            
-            try:
-                # 使用标准评估函数
-                accuracy = compute_vqa_accuracy_metric(
-                    temp_result_file,
-                    val_ques_path,
-                    val_ann_path
-                )
+            # 如果提供了缓存的 VQA 对象，使用缓存（避免重复加载）
+            if vqa_cache is not None:
+                # 创建临时结果文件
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                    temp_result_file = f.name
+                    json.dump([{
+                        "answer": pred_answer,
+                        "question_id": question_id,
+                    }], f, indent=4)
                 
-                # 处理准确率格式
-                if accuracy > 1:
-                    acc_score = accuracy / 100.0
-                else:
-                    acc_score = accuracy
+                try:
+                    # 使用缓存的 VQA 对象，抑制打印输出（避免干扰 tqdm 进度条）
+                    # 使用 StringIO 捕获输出，而不是完全重定向，这样不会影响 tqdm
+                    with contextlib.redirect_stdout(StringIO()):
+                        vqaRes = vqa_cache.loadRes(temp_result_file, val_ques_path)
+                        vqaEval = VQAEval(vqa_cache, vqaRes, n=2)
+                        # 只评估当前问题
+                        vqaEval.params = {"question_id": [int(question_id)]}
+                        vqaEval.evaluate()
+                    
+                    # 获取单个问题的准确率
+                    if int(question_id) in vqaEval.evalQA:
+                        accuracy = vqaEval.evalQA[int(question_id)]
+                    else:
+                        accuracy = 0.0
+                    
+                    # 处理准确率格式
+                    if accuracy > 1:
+                        acc_score = accuracy / 100.0
+                    else:
+                        acc_score = accuracy
+                    
+                    correct = 1 if acc_score > 0.0 else 0
+                    
+                    return correct, acc_score, True  # 使用了文件方式
+                finally:
+                    # 清理临时文件
+                    if os.path.exists(temp_result_file):
+                        os.remove(temp_result_file)
+            else:
+                # 没有缓存，使用标准评估函数（会重新加载文件）
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                    temp_result_file = f.name
+                    json.dump([{
+                        "answer": pred_answer,
+                        "question_id": question_id,
+                    }], f, indent=4)
                 
-                correct = 1 if acc_score > 0.0 else 0
-                
-                return correct, acc_score
-            finally:
-                # 清理临时文件
-                if os.path.exists(temp_result_file):
-                    os.remove(temp_result_file)
+                try:
+                    # 使用标准评估函数
+                    accuracy = compute_vqa_accuracy_metric(
+                        temp_result_file,
+                        val_ques_path,
+                        val_ann_path
+                    )
+                    
+                    # 处理准确率格式
+                    if accuracy > 1:
+                        acc_score = accuracy / 100.0
+                    else:
+                        acc_score = accuracy
+                    
+                    correct = 1 if acc_score > 0.0 else 0
+                    
+                    return correct, acc_score, True  # 使用了文件方式
+                finally:
+                    # 清理临时文件
+                    if os.path.exists(temp_result_file):
+                        os.remove(temp_result_file)
         except Exception as e:
             print(f"警告：使用文件方式计算准确率失败，回退到简单匹配: {e}")
     
@@ -336,16 +381,16 @@ def compute_vqa_accuracy(
     
     # 精确匹配
     if pred_answer_lower in gt_answers_lower:
-        return 1, 1.0
+        return 1, 1.0, False  # 使用了 fallback
     
     # 部分匹配（检查预测答案是否包含标准答案，或标准答案是否包含预测答案）
     for gt_ans in gt_answers_lower:
         if pred_answer_lower in gt_ans or gt_ans in pred_answer_lower:
             # 部分匹配，给予较低的分数
-            return 1, 0.5
+            return 1, 0.5, False  # 使用了 fallback
     
     # 不匹配
-    return 0, 0.0
+    return 0, 0.0, False  # 使用了 fallback
 
 
 def generate_rl_data(
@@ -363,7 +408,9 @@ def generate_rl_data(
     device: torch.device = None,
     generation_kwargs: Optional[Dict] = None,
     val_ques_path: Optional[str] = None,
-    val_ann_path: Optional[str] = None
+    val_ann_path: Optional[str] = None,
+    train_ques_path: Optional[str] = None,
+    train_ann_path: Optional[str] = None
 ) -> Dict:
     """
     生成完整的 RL 数据
@@ -395,6 +442,30 @@ def generate_rl_data(
     
     # 构建 candidate 索引映射
     cand_idx_to_pos = {idx: pos for pos, idx in enumerate(candidate_indices)}
+    
+    # 统计变量：用于跟踪文件方式 vs fallback 的使用情况
+    total_accuracy_computations = 0
+    file_metric_count = 0
+    fallback_count = 0
+    
+    # 优化：预先加载 VQA 对象（只加载一次，避免重复加载）
+    vqa_train_cache = None
+    vqa_val_cache = None
+    if train_ques_path and train_ann_path:
+        try:
+            print("预加载训练集 VQA 标注文件（优化：只加载一次）...")
+            vqa_train_cache = VQA(train_ann_path, train_ques_path)
+            print("✓ 训练集 VQA 对象已缓存")
+        except Exception as e:
+            print(f"警告：预加载训练集 VQA 对象失败: {e}")
+    
+    if val_ques_path and val_ann_path:
+        try:
+            print("预加载验证集 VQA 标注文件（优化：只加载一次）...")
+            vqa_val_cache = VQA(val_ann_path, val_ques_path)
+            print("✓ 验证集 VQA 对象已缓存")
+        except Exception as e:
+            print(f"警告：预加载验证集 VQA 对象失败: {e}")
     
     print(f"开始生成 RL 数据...")
     print(f"  - Query 数量: {len(beam_data)}")
@@ -460,13 +531,56 @@ def generate_rl_data(
                 
                 # 计算准确率
                 question_id_str = query_item.get("question_id", str(query_id))
-                correct, acc_score = compute_vqa_accuracy(
-                    pred_answer=pred_answer,
-                    ground_truth_answers=gt_answers,
-                    question_id=question_id_str,
-                    val_ques_path=val_ques_path,
-                    val_ann_path=val_ann_path
-                )
+                
+                # 优先尝试训练集文件（因为 RL 数据通常来自训练集），如果失败再尝试验证集文件
+                used_file_metric = False
+                
+                # 先尝试训练集文件（如果提供）
+                if train_ques_path and train_ann_path:
+                    try:
+                        correct, acc_score, used_file_metric = compute_vqa_accuracy(
+                            pred_answer=pred_answer,
+                            ground_truth_answers=gt_answers,
+                            question_id=question_id_str,
+                            val_ques_path=train_ques_path,
+                            val_ann_path=train_ann_path,
+                            vqa_cache=vqa_train_cache  # 使用缓存的 VQA 对象
+                        )
+                    except Exception as e:
+                        # 训练集文件失败，继续尝试验证集文件
+                        used_file_metric = False
+                
+                # 如果训练集文件未使用或失败，尝试验证集文件
+                if not used_file_metric and val_ques_path and val_ann_path:
+                    try:
+                        correct, acc_score, used_file_metric = compute_vqa_accuracy(
+                            pred_answer=pred_answer,
+                            ground_truth_answers=gt_answers,
+                            question_id=question_id_str,
+                            val_ques_path=val_ques_path,
+                            val_ann_path=val_ann_path,
+                            vqa_cache=vqa_val_cache  # 使用缓存的 VQA 对象
+                        )
+                    except Exception as e:
+                        # 验证集文件也失败，会 fallback 到字符串匹配
+                        used_file_metric = False
+                
+                # 如果都失败，使用 fallback（compute_vqa_accuracy 内部会处理）
+                if not used_file_metric:
+                    correct, acc_score, used_file_metric = compute_vqa_accuracy(
+                        pred_answer=pred_answer,
+                        ground_truth_answers=gt_answers,
+                        question_id=question_id_str,
+                        val_ques_path=None,  # 强制 fallback
+                        val_ann_path=None
+                    )
+                
+                # 统计使用情况
+                total_accuracy_computations += 1
+                if used_file_metric:
+                    file_metric_count += 1
+                else:
+                    fallback_count += 1
                 
                 # 添加 correctness 信息
                 c["vqa_pred_answer"] = pred_answer
@@ -489,6 +603,17 @@ def generate_rl_data(
             "pointer_candidates": pointer_candidates_with_correctness
         }
     
+    # 打印统计信息
+    print(f"\n✓ RL 数据生成完成！")
+    print(f"  - 总准确率计算次数: {total_accuracy_computations}")
+    if total_accuracy_computations > 0:
+        file_metric_ratio = file_metric_count / total_accuracy_computations * 100
+        fallback_ratio = fallback_count / total_accuracy_computations * 100
+        print(f"  - 使用文件方式计算: {file_metric_count} ({file_metric_ratio:.1f}%)")
+        print(f"  - 使用 fallback 字符串匹配: {fallback_count} ({fallback_ratio:.1f}%)")
+        if fallback_ratio > 10.0:
+            print(f"  ⚠️  警告：fallback 比例较高 ({fallback_ratio:.1f}%)，建议检查 question_id 映射或提供 val_ques_path/val_ann_path")
+    
     return rl_data
 
 
@@ -509,6 +634,8 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="设备")
     parser.add_argument("--val_ques_path", type=str, help="验证集问题文件路径（可选，用于准确率计算）")
     parser.add_argument("--val_ann_path", type=str, help="验证集标注文件路径（可选，用于准确率计算）")
+    parser.add_argument("--train_ques_path", type=str, help="训练集问题文件路径（可选，用于准确率计算，RL数据通常来自训练集）")
+    parser.add_argument("--train_ann_path", type=str, help="训练集标注文件路径（可选，用于准确率计算，RL数据通常来自训练集）")
     parser.add_argument("--train_path", type=str, help="训练集JSON文件路径（用于VQA数据集）")
     parser.add_argument("--val_path", type=str, help="验证集JSON文件路径（用于VQA数据集）")
     parser.add_argument("--train_coco_root", type=str, help="COCO训练集图片根目录")
@@ -778,7 +905,9 @@ def main():
         device=device,
         generation_kwargs={},
         val_ques_path=args.val_ques_path,
-        val_ann_path=args.val_ann_path
+        val_ann_path=args.val_ann_path,
+        train_ques_path=args.train_ques_path,
+        train_ann_path=args.train_ann_path
     )
     
     # 保存

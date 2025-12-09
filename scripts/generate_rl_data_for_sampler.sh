@@ -47,21 +47,35 @@ case "$dataset" in
         sample_num=800
         dataset_name="okvqa"
         task="vqa"
+        # VQA 标注文件路径（用于准确率计算）
+        # questions 文件需要包含 "questions" 键，annotations 文件需要包含 "annotations" 键
+        # RL 数据通常来自训练集，所以优先使用训练集文件
+        train_ques_path="./datasets/okvqa/OpenEnded_mscoco_train2014_questions.json"
+        train_ann_path="./datasets/okvqa/mscoco_train2014_annotations.json"
+        val_ques_path="./datasets/okvqa/OpenEnded_mscoco_val2014_questions.json"
+        val_ann_path="./datasets/okvqa/mscoco_val2014_annotations.json"
         ;;
     vqav2*|VQAV2*)
         sample_num=5000
         dataset_name="vqav2"
         task="vqa"
+        # VQA 标注文件路径（用于准确率计算）
+        val_ques_path="./datasets/vqav2/v2_OpenEnded_mscoco_val2014_questions.json"
+        val_ann_path="./datasets/vqav2/v2_mscoco_val2014_annotations.json"
         ;;
     coco2017*|COCO2017*)
         sample_num=5000
         dataset_name="coco2017"
         task="caption"
+        val_ques_path=""
+        val_ann_path=""
         ;;
     *)
         sample_num=5000
         dataset_name="${dataset}"
         task="vqa"
+        val_ques_path=""
+        val_ann_path=""
         ;;
 esac
 
@@ -143,15 +157,50 @@ output_dir=$(dirname "$rl_data_path")
 mkdir -p "$output_dir"
 
 # 执行生成命令
-python -m lever_lm.models.v3.generate_rl_data \
-    --sft_ckpt "$sft_ckpt" \
-    --beam_data "$beam_data_path" \
-    --output_path "$rl_data_path" \
-    --query_emb "$query_emb_path" \
-    --cand_emb "$cand_emb_path" \
-    --device "$device" \
-    --vqa_model "$beam_model" \
-    --dataset "$dataset"
+cmd="python -m lever_lm.models.v3.generate_rl_data \
+    --sft_ckpt \"$sft_ckpt\" \
+    --beam_data \"$beam_data_path\" \
+    --output_path \"$rl_data_path\" \
+    --query_emb \"$query_emb_path\" \
+    --cand_emb \"$cand_emb_path\" \
+    --device \"$device\" \
+    --vqa_model \"$beam_model\" \
+    --dataset \"$dataset\""
+
+# 如果是 VQA 任务，添加标注文件路径（重要：用于准确率计算）
+# RL 数据通常来自训练集，所以优先使用训练集文件
+if [ "$task" == "vqa" ]; then
+    # 添加训练集文件（如果存在）
+    if [ -n "$train_ques_path" ] && [ -n "$train_ann_path" ]; then
+        if [ -f "$train_ques_path" ] && [ -f "$train_ann_path" ]; then
+            cmd="$cmd --train_ques_path \"$train_ques_path\" --train_ann_path \"$train_ann_path\""
+            echo "使用训练集 VQA 标注文件（优先）:"
+            echo "  - Questions: $train_ques_path"
+            echo "  - Annotations: $train_ann_path"
+        fi
+    fi
+    
+    # 添加验证集文件（作为 fallback）
+    if [ -n "$val_ques_path" ] && [ -n "$val_ann_path" ]; then
+        if [ -f "$val_ques_path" ] && [ -f "$val_ann_path" ]; then
+            cmd="$cmd --val_ques_path \"$val_ques_path\" --val_ann_path \"$val_ann_path\""
+            echo "使用验证集 VQA 标注文件（fallback）:"
+            echo "  - Questions: $val_ques_path"
+            echo "  - Annotations: $val_ann_path"
+        else
+            echo "⚠️  警告: 验证集 VQA 标注文件不存在"
+            echo "  - Questions: $val_ques_path"
+            echo "  - Annotations: $val_ann_path"
+        fi
+    fi
+    
+    # 如果都没有，给出警告
+    if [ -z "$train_ques_path" ] && [ -z "$val_ques_path" ]; then
+        echo "⚠️  警告: 未提供 VQA 标注文件，将使用 fallback 字符串匹配"
+    fi
+fi
+
+eval $cmd
 
 if [ $? -eq 0 ]; then
     echo "=========================================="
