@@ -85,7 +85,34 @@ def load_sft_model(checkpoint_path: str, device: torch.device) -> PointerSelecto
     else:
         state_dict = ckpt
     
-    model.load_state_dict(state_dict, strict=False)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    
+    # 检查缺失的参数
+    if missing:
+        print(f"[警告] 加载 checkpoint 时有 {len(missing)} 个参数缺失，例如：")
+        for k in list(missing)[:10]:
+            print(f"  - missing: {k}")
+        if len(missing) > 10:
+            print(f"  ... 还有 {len(missing) - 10} 个参数缺失")
+    
+    # 检查多余的参数
+    if unexpected:
+        print(f"[警告] 有 {len(unexpected)} 个多余参数，例如：")
+        for k in list(unexpected)[:10]:
+            print(f"  - unexpected: {k}")
+        if len(unexpected) > 10:
+            print(f"  ... 还有 {len(unexpected) - 10} 个多余参数")
+    
+    # 如果缺失的关键参数太多，直接 raise
+    if len(missing) > 1000:
+        raise RuntimeError(
+            f"Checkpoint 与当前模型结构差异过大（缺失 {len(missing)} 个参数），请检查模型配置。"
+        )
+    
+    # 如果没有missing和unexpected，说明checkpoint完全匹配
+    if not missing and not unexpected:
+        print("✓ Checkpoint 参数完全匹配，加载成功")
+    
     model.to(device)
     model.eval()
     

@@ -188,20 +188,39 @@ elif [ "${version}" == "v3" ]; then
         
         if [ -f "${v2format_path}" ]; then
             echo "✓ v2format 文件已存在: $(basename ${v2format_path})"
+            echo "  直接使用已转换的 checkpoint，跳过转换步骤"
             ckpt_path="${v2format_path}"
         else
             echo "=========================================="
             echo "自动转换 v3 checkpoint 为 v2 格式..."
             echo "=========================================="
-            python scripts/convert_v3_to_v2_format.py --v3_ckpt "${v3_pt_path}"
+            echo "  v3 checkpoint: ${v3_pt_path}"
+            echo "  目标路径: ${v2format_path}"
             
-            if [ -f "${v2format_path}" ]; then
-                echo "✓ 转换成功: $(basename ${v2format_path})"
-                ckpt_path="${v2format_path}"
-            else
-                echo "✗ 转换失败，使用原始 .pt 文件"
+            # 检查转换脚本是否存在
+            if [ ! -f "scripts/convert_v3_to_v2_format.py" ]; then
+                echo "✗ 错误: 转换脚本不存在: scripts/convert_v3_to_v2_format.py"
+                echo "  使用原始 .pt 文件（可能无法正常推理）"
                 ckpt_path="${v3_pt_path}"
                 export LEVER_LM_CHECKPOINT_VERSION="v3"
+            else
+                # 执行转换
+                if python scripts/convert_v3_to_v2_format.py --v3_ckpt "${v3_pt_path}"; then
+                    # 检查转换是否成功
+                    if [ -f "${v2format_path}" ]; then
+                        echo "✓ 转换成功: $(basename ${v2format_path})"
+                        ckpt_path="${v2format_path}"
+                    else
+                        echo "✗ 警告: 转换脚本执行成功，但未找到输出文件"
+                        echo "  使用原始 .pt 文件（可能无法正常推理）"
+                        ckpt_path="${v3_pt_path}"
+                        export LEVER_LM_CHECKPOINT_VERSION="v3"
+                    fi
+                else
+                    echo "✗ 转换失败（退出码: $?），使用原始 .pt 文件（可能无法正常推理）"
+                    ckpt_path="${v3_pt_path}"
+                    export LEVER_LM_CHECKPOINT_VERSION="v3"
+                fi
             fi
         fi
         

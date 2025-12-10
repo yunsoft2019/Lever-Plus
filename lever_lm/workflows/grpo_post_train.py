@@ -333,14 +333,44 @@ class GRPOTrainer:
         if sft_checkpoint:
             print(f"加载SFT检查点: {sft_checkpoint}")
             ckpt = torch.load(sft_checkpoint, map_location=self.device)
+            
+            # 根据checkpoint格式选择state_dict
             if "model_state_dict" in ckpt:
-                self.model.load_state_dict(ckpt["model_state_dict"], strict=False)
+                state_dict = ckpt["model_state_dict"]
             elif "state_dict" in ckpt:
                 # PyTorch Lightning格式
                 state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
-                self.model.load_state_dict(state_dict, strict=False)
             else:
-                self.model.load_state_dict(ckpt, strict=False)
+                state_dict = ckpt
+            
+            # 加载并检查参数一致性
+            missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+            
+            # 检查缺失的参数
+            if missing:
+                print(f"[警告] 加载 checkpoint 时有 {len(missing)} 个参数缺失，例如：")
+                for k in list(missing)[:10]:
+                    print(f"  - missing: {k}")
+                if len(missing) > 10:
+                    print(f"  ... 还有 {len(missing) - 10} 个参数缺失")
+            
+            # 检查多余的参数
+            if unexpected:
+                print(f"[警告] 有 {len(unexpected)} 个多余参数，例如：")
+                for k in list(unexpected)[:10]:
+                    print(f"  - unexpected: {k}")
+                if len(unexpected) > 10:
+                    print(f"  ... 还有 {len(unexpected) - 10} 个多余参数")
+            
+            # 如果缺失的关键参数太多，直接 raise
+            if len(missing) > 1000:
+                raise RuntimeError(
+                    f"Checkpoint 与当前模型结构差异过大（缺失 {len(missing)} 个参数），请检查模型配置。"
+                )
+            
+            # 如果没有missing和unexpected，说明checkpoint完全匹配
+            if not missing and not unexpected:
+                print("✓ Checkpoint 参数完全匹配，加载成功")
         
         # 创建SFT模型副本用于计算old_log_probs
         sft_model = PointerSelectorV3(
@@ -382,7 +412,19 @@ class GRPOTrainer:
         
         print("="*80)
         
-        # ========== 阶段3：GRPO训练 ==========
+        # ========== 阶段3：GRPO训练（可选）==========
+        if self.grpo_epochs <= 0:
+            print("\n" + "="*100)
+            print("⚠️  GRPO epochs == 0，仅进行 RCE 预热，不执行 GRPO。")
+            print("="*100)
+            print("✓ RCE-only baseline 训练完成，当前模型即为最终模型。")
+            print("="*100)
+            print("\n" + "="*100)
+            print("✓ GRPO Post-Training 完成！")
+            print("="*100)
+            return  # 直接结束，当前模型即为 RCE-only baseline
+        
+        # GRPO 训练（仅在 grpo_epochs > 0 时执行）
         if self.grpo_epochs > 0:
             print("\n" + "="*100)
             print("阶段3：GRPO训练")
@@ -408,12 +450,6 @@ class GRPOTrainer:
             print("="*100)
             print("✓ GRPO 训练完成！")
             print("="*100)
-        else:
-            print("\n" + "="*100)
-            print("跳过 GRPO 训练（grpo_epochs=0）")
-            print("="*100)
-            print("✓ 仅使用 RCE 训练完成！")
-            print("="*100)
         
         print("\n" + "="*100)
         print("✓ GRPO Post-Training 完成！")
@@ -427,8 +463,8 @@ def main():
     parser.add_argument("--output_dir", type=str, default="results/grpo", help="输出目录")
     parser.add_argument("--img_emb", type=str, default=None, help="图像embedding缓存路径(.pth)")
     parser.add_argument("--text_emb", type=str, default=None, help="文本embedding缓存路径(.pth)")
-    parser.add_argument("--rce_epochs", type=int, default=1, help="RCE预热epochs")
-    parser.add_argument("--grpo_epochs", type=int, default=3, help="GRPO训练epochs")
+    parser.add_argument("--rce_epochs", type=int, default=5, help="RCE预热epochs（推荐5，RCE-only baseline）")
+    parser.add_argument("--grpo_epochs", type=int, default=0, help="GRPO训练epochs（推荐0，即RCE-only模式；GRPO仅作为可选实验功能）")
     parser.add_argument("--batch_size", type=int, default=32, help="批次大小")
     parser.add_argument("--rce_lr", type=float, default=1e-4, help="RCE学习率")
     parser.add_argument("--grpo_lr", type=float, default=1e-5, help="GRPO学习率")
@@ -674,7 +710,29 @@ def main():
             print(f"  - 未匹配参数: {missing_keys}")
         
         # 加载权重
-        model.load_state_dict(filtered_state_dict, strict=False)
+        missing, unexpected = model.load_state_dict(filtered_state_dict, strict=False)
+        
+        # 检查缺失的参数
+        if missing:
+            print(f"[警告] 加载 v2 checkpoint 时有 {len(missing)} 个参数缺失，例如：")
+            for k in list(missing)[:10]:
+                print(f"  - missing: {k}")
+            if len(missing) > 10:
+                print(f"  ... 还有 {len(missing) - 10} 个参数缺失")
+        
+        # 检查多余的参数
+        if unexpected:
+            print(f"[警告] 有 {len(unexpected)} 个多余参数，例如：")
+            for k in list(unexpected)[:10]:
+                print(f"  - unexpected: {k}")
+            if len(unexpected) > 10:
+                print(f"  ... 还有 {len(unexpected) - 10} 个多余参数")
+        
+        # 如果缺失的关键参数太多，直接 raise
+        if len(missing) > 1000:
+            raise RuntimeError(
+                f"v2 Checkpoint 与当前 v3 模型结构差异过大（缺失 {len(missing)} 个参数），请检查模型配置。"
+            )
         print("✓ SFT权重加载完成")
     else:
         print("未提供SFT检查点，从头开始训练")
