@@ -526,7 +526,8 @@ def main(cfg: DictConfig):
                 result_json_path = os.path.join(result_dir, result_filename)
                 logger.info(f"使用新路径格式（版本: {version}）: {result_json_path}")
             else:
-                logger.warning(f"无法从检查点文件名解析信息，使用旧路径格式")
+                logger.info(f"检查点已加载: {lever_lm_path}")
+                logger.info(f"检查点文件名格式不符合新规范（v2格式），结果文件将使用旧路径格式保存")
                 result_dir = os.path.join(
                     cfg.result_dir,
                     "icl_inference",

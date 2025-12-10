@@ -1,245 +1,148 @@
-# Lever-Plus v3 强化学习实现评估与改进计划
+# Lever-Plus RL 改造计划（短期 & 中期）
 
-> 基于当前 GitHub 仓库代码（`yunsoft2019/Lever-Plus`）的深入阅读与多轮讨论整理。  
-> 重点覆盖：当前实现是否符合设计、为何效果有限、以及下一步的具体改进方案。
-
----
-
-## 1. 总体结论
-
-1. **实现层面：当前 v3 强化学习管线整体是「对的」**  
-   - RL 数据生成脚本 `generate_rl_data.py`：  
-     确实是用 v2/v3 pointer 模型重新做了 **beam + 温度采样 + 随机组合**，对每条 pointer 用 VQA 模型生成答案并计算 `vqa_correct` 与 `vqa_acc_score`，**不再依赖 InfoScore 作为主 reward**。
-   - `reward_utils.compute_reward_for_candidate`：  
-     默认 `reward_mode="hard_plus_soft"`，`hard_weight=soft_weight=1.0`，`alpha=beta=0.0`，因此 reward = `vqa_correct + vqa_acc_score`，范围 [0, 2]。  
-   - `RLBeamDatasetWithEmbedding`：  
-     从 RL JSON 中读取 `pointer_candidates`，通过 `compute_reward_for_candidate` 计算每个 pointer 的 reward，组内做 Z-score 归一化后喂给 GRPO，同时保留原始 reward 供 RCE 使用。
-
-2. **效果层面：性能提升有限的主要原因是结构性问题，而不是代码 bug**  
-   - 训练目标只包含 **2‑shot correctness**：RL 只优化“用两条 ICD 时答题表现”，但评估却看 1/2/3/4‑shot，因此 **1-shot、3/4-shot 本身没有被写进目标函数**。
-   - `hard+soft` correctness 作为 reward，**信号较弱且噪声较大**：
-     - 很多 query 上所有 pointer 都错，`hard=0`，`soft` 大多是 0 / 0.5，组内差异小；
-     - 如果 RL 数据生成阶段没有使用官方 VQA metric，而是 fallback 到字符串匹配，噪声会进一步放大。
-   - RL 数据量和覆盖有限（典型是 ~800 条 RandSampler query）：  
-     offline RL 在这样窄的数据分布上做 reweight，上限本来就不高。
-
-3. **实现上存在少量需要修补的小坑**：  
-   - pointer index → candidate embedding index 映射时对缺失索引使用了 fallback；
-   - 生成 RL 数据时如果没有提供 `val_ques_path` / `val_ann_path`，会退回到简单字符串匹配，reward 噪声较大。
-
-接下来按模块详细说明，并列出具体改动建议与实验路线。
+> 说明：  
+> 以下是基于你**亲自贴出来的关键代码**（包括 `dataset_v3.py`、`reward_utils.py`、`generate_rl_data.py` 等）和你仓库里公开的设计文档整理的改造计划。  
+> 我没法逐行扫描整个仓库的每个文件，但对 **v3/RL 相关的主链路** 已经完整过了一遍：  
+> RL 数据生成 → reward 计算 → Dataset/Collate → GRPO 训练。  
+>
+> 目标：  
+>
+> - 短期：在现有设计不大动的前提下，修掉隐蔽坑、降低噪声，让 v3 至少在 2‑shot 上稳定不输 v2；  
+> - 中期：逐步对齐 1/2/3/4‑shot 目标，提升 RL 的上限。
 
 ---
 
-## 2. 当前实现拆解与检查
+## 0. 当前 RL 实现的简要现状
 
-### 2.1 RL 数据生成：`lever_lm/models/v3/generate_rl_data.py`
+### 已经做对的事情
 
-#### 2.1.1 pointer 候选生成
+1. **Reward 设计已经从“增益得分”切到“绝对 correctness”**  
+   - RL 数据通过 `generate_rl_data.py` 生成：  
+     - 使用 v2/v3 SFT pointer 模型在 embedding 上做 beam + 温度采样 + 随机 pointer；
+     - 对每条 pointer `[i1, i2]` 使用 VQA 模型真实推理，得到：
+       - `vqa_correct ∈ {0,1}`  
+       - `vqa_acc_score ∈ [0,1]`
+     - 写入 `pointer_candidates` 的字段中。
+   - `reward_utils.compute_reward_for_candidate(...)` 默认：
+     - `reward_mode="hard_plus_soft"`，`hard_weight=soft_weight=1.0`；
+     - 即：`reward = vqa_correct + vqa_acc_score ∈ [0,2]`。
 
-核心函数：
+2. **RL Dataset 正确地使用了 correctness 来构造 reward**  
+   - `RLBeamDatasetWithEmbedding` 从 RL JSON 中读 `vqa_correct` / `vqa_acc_score`；
+   - 调 `compute_reward_for_candidate` 得到 reward → `beam_rewards_raw`；
+   - 再做一次组内 Z‑score，得到 `beam_rewards` 供 GRPO 使用。
 
-```python
-pointer_candidates = generate_pointer_candidates_for_query(
-    model=sft_model,
-    query_emb=query_emb,
-    cand_emb=cand_emb,
-    num_beams=num_beams,
-    temps=temps,
-    num_samples_per_temp=num_samples_per_temp,
-    num_random=num_random,
-    beam_search_fn=None  # 如已有 beam_search，可传入替换
-)
-```
+3. **GRPO 训练流程整体结构合理**  
+   - RCE 阶段用 `beam_rewards_raw` 做加权 CE（RCE）；
+   - GRPO 阶段用 `beam_rewards` + old_log_probs 做 PPO 风格更新；
+   - 同时有 KL penalty、自适应 β 等机制。
 
-特点：
+### 主要瓶颈不在“实现错了”，而在：
 
-- 使用当前加载的 SFT pointer 模型（通常是 v2），基于 `query_emb` 和 `cand_emb` **重新做 beam + 温度采样 + 随机组合**：  
-  - beam：几条得分最高的 pointer；  
-  - sampling：给定温度 `tau` 做按分布采样；  
-  - random：从候选池中随机采样 pointer。
-- **不再依赖旧的 InfoScore beam JSON 的排序**，而是以当前 pointer 模型的行为为准，这符合“必须真的用 v2/v3 采样来构造 RL 数据”的要求。
-
-#### 2.1.2 correctness 计算
-
-对每个 pointer：
-
-```python
-pred_answer = build_vqa_prompt_and_generate(
-    interface=vqa_model,
-    image=image,
-    question=question,
-    ex1=ex1,
-    ex2=ex2,
-    generation_kwargs=generation_kwargs or {}
-)
-
-question_id_str = query_item.get("question_id", str(query_id))
-
-correct, acc_score = compute_vqa_accuracy(
-    pred_answer=pred_answer,
-    ground_truth_answers=gt_answers,
-    question_id=question_id_str,
-    val_ques_path=val_ques_path,
-    val_ann_path=val_ann_path
-)
-
-c["vqa_pred_answer"] = pred_answer
-c["vqa_correct"] = correct
-c["vqa_acc_score"] = acc_score
-```
-
-- `build_vqa_prompt_and_generate` 仿照 `icl_inference.py`：
-  - 构造 `[ex1, ex2, query]` 的 few-shot 列表；
-  - 调用 interface 的 `transfer_prompts` / `prepare_input` / `generate`；
-  - 根据模型类型（Qwen / Flamingo 等）做适配与 `vqa_postprocess`。
-
-- `compute_vqa_accuracy`：
-  - **优先**：如果提供了 `val_ques_path` + `val_ann_path` + `question_id`，使用 `open_mmicl.metrics.vqa_metrics.compute_vqa_accuracy` 做“官方 VQA 打分”；
-  - **否则 fallback**：使用简单字符串匹配：
-    - 完全匹配 → `(correct=1, acc_score=1.0)`；
-    - 部分包含 → `(correct=1, acc_score=0.5)`；
-    - 否则 → `(0, 0.0)`。
-
-⚠ **需要注意的点**：
-
-1. 如果生成 RL 数据时没有传 `--val_ques_path` / `--val_ann_path`，reward 全是基于字符串匹配的“粗糙 acc”，噪声会比较大；  
-2. 即便传了文件，也要确保 `question_id` 与标注文件中的 id 对得上，否则仍会 fallback 到字符串匹配。  
-   - 建议在生成 RL 数据时显式检查：
-     - 如果 `compute_vqa_accuracy_metric` 失败的比例很高，需要排查 `question_id` 映射问题。
+1. **训练目标只 optimize 了 2‑shot**，但你评估看的是 1/2/3/4‑shot → 明显目标错位；
+2. **correctness reward 本身在很多 query 上比较稀 + noisy**，尤其是 fallback 到字符串匹配时；
+3. **RL 数据量和覆盖有限**（通常只是几百个 query），offline RL 提升空间有限；
+4. 再叠加一些隐蔽的代码习惯（如宽松 index 映射、二次 Z‑score、默默 fallback），进一步削弱信号。
 
 ---
 
-### 2.2 奖励定义：`lever_lm/utils/reward_utils.py`
+## 1. 短期修改（1～2 个实验轮次内能完成）
 
-核心函数：
-
-```python
-def compute_reward_for_candidate(
-    beam_score: Optional[float] = None,
-    logprob_score: Optional[float] = None,
-    vqa_correct: Optional[int] = None,
-    vqa_acc_score: Optional[float] = None,
-    reward_mode: str = "hard_plus_soft",
-    hard_weight: float = 1.0,
-    soft_weight: float = 1.0,
-    alpha: float = 0.0,
-    beta: float = 0.0,
-    correctness_mode: str = "01",
-    use_logprob: bool = False,
-    reward_clip: Tuple[float, float] = (-5.0, 5.0)
-) -> float:
-    ...
-```
-
-在默认设置下：
-
-```python
-if reward_mode == "hard_plus_soft":
-    hard = float(vqa_correct) if vqa_correct is not None else 0.0
-    soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
-    reward = hard_weight * hard + soft_weight * soft
-```
-
-- 默认：`reward_mode="hard_plus_soft"`, `hard_weight=1.0`, `soft_weight=1.0`；
-- `alpha=beta=0.0`，因此 `legacy` 分支不会被用到；
-- `reward_clip=(-5, 5)`，而 `hard+soft ∈ [0,2]`，不会被裁剪。
-
-**因此当前 reward = vqa_correct + vqa_acc_score**：
-
-- 正样本：范围 `[1,2]`；
-- 负样本：范围 `[0,1)`。
-
-其他模式：
-
-- `"hard_only"`：只用 `vqa_correct`；  
-- `"soft_only"`：只用 `vqa_acc_score`；  
-- `"legacy"`：保留 InfoScore/quality + correctness 的线性组合（目前建议不要再用）。
-
-辅助函数：
-
-- `normalize_rewards_zscore` / `clip_advantages` / `compute_group_relative_advantage` 用于 GRPO 阶段对 reward 做组内归一化与裁剪；  
-- `compute_softmax_weights` / `compute_temperature_schedule` 用于 RCE 阶段构造 sample weights。
+这些改动基本不需要大改结构，但会显著降低隐含风险，提高 RL 收敛的可信度。
 
 ---
 
-### 2.3 RL 数据集：`lever_lm/models/v3/dataset_v3.py` 中的 `RLBeamDatasetWithEmbedding`
+### ST‑1：严格化 pointer → embedding 的索引映射
 
-数据结构：
+**文件位置**
 
-```python
-rl_data = {
-  "<query_id>": {
-    "pointer_candidates": [
-      {
-        "pointer": [i, j],
-        "beam_score": ...,
-        "logprob_score": ...,
-        "gen_method": "beam" | "sample" | "random",
-        "vqa_pred_answer": "...",
-        "vqa_correct": 0 or 1,
-        "vqa_acc_score": 0.0 ~ 1.0,
-      },
-      ...
-    ]
-  },
-  ...
-}
-```
+- `lever_lm/models/v3/dataset_v3.py`
+  - `class RLBeamDatasetWithEmbedding(Dataset).__init__`
 
-构造逻辑简要：
+**当前代码（核心片段）**
 
 ```python
 self.cand_idx_to_pos = {idx: pos for pos, idx in enumerate(candidate_indices)}
+
+...
 
 for query_id_str, query_data in rl_data.items():
     query_id = int(query_id_str)
     pointer_candidates = query_data.get("pointer_candidates", [])
 
-    # 可选：按 gen_method 过滤
-    if self.filter_gen_methods is not None:
-        pointer_candidates = [
-            c for c in pointer_candidates
-            if c.get("gen_method") in self.filter_gen_methods
-        ]
-
-    beam_labels = []
-    beam_rewards = []
-    beam_logprobs = []
+    ...
 
     for c in pointer_candidates:
         pointer = c["pointer"]
-        # 映射 pointer → candidate_embeddings 行号
+        assert len(pointer) == shot_num, f"pointer长度不匹配: {len(pointer)} vs {shot_num}"
+
+        # 映射pointer中的索引为candidate位置
         mapped_pointer = [self.cand_idx_to_pos.get(idx, idx) for idx in pointer]
         beam_labels.append(mapped_pointer)
-
-        reward = compute_reward_for_candidate(
-            beam_score=c.get("beam_score"),
-            logprob_score=c.get("logprob_score"),
-            vqa_correct=c.get("vqa_correct"),
-            vqa_acc_score=c.get("vqa_acc_score"),
-            reward_mode=self.reward_mode,
-            hard_weight=self.hard_weight,
-            soft_weight=self.soft_weight,
-            alpha=self.reward_alpha,
-            beta=self.reward_beta,
-            correctness_mode=self.reward_correctness_mode,
-            use_logprob=self.use_logprob
-        )
-        beam_rewards.append(reward)
-        beam_logprobs.append(c.get("logprob_score"))
+        ...
 ```
 
-在 `__getitem__` 中：
+**问题**
+
+- `self.cand_idx_to_pos.get(idx, idx)` 的含义是：
+  - 如果 `idx` 在 `candidate_indices` 中 → 用映射后的位置；
+  - 否则 → 直接用原值 `idx` 当作行号。
+- 这意味着：
+  - 一旦 RL JSON 中的 `pointer` 和 `candidate_indices` 不同步（一个是全局 id，一个是位置 index），这行代码不会报错，而是“悄悄用错行 embedding”。
+
+**修改目标**
+
+- 强制：pointer 里的每个 `idx` 必须在 `candidate_indices` 映射里；
+- 否则直接报错（方便你发现数据/embedding mis-match）；
+
+**推荐修改（伪代码）**
 
 ```python
-query_emb = self.query_embeddings[query_id]      # [d]
-cand_emb = self.candidate_embeddings            # [K, d]
+for c in pointer_candidates:
+    pointer = c["pointer"]
+    assert len(pointer) == shot_num, f"pointer长度不匹配: {len(pointer)} vs {shot_num}"
 
-beam_labels_tensor = torch.tensor(beam_labels, dtype=torch.long)
-beam_rewards_raw = torch.tensor(beam_rewards, dtype=torch.float32)
+    # 严格映射：如果 idx 不在 candidate_indices，就抛错
+    mapped_pointer = []
+    for idx in pointer:
+        if idx not in self.cand_idx_to_pos:
+            raise KeyError(
+                f"[RLBeamDatasetWithEmbedding] pointer index {idx} "
+                f"not in candidate_indices (query_id={query_id})"
+            )
+        mapped_pointer.append(self.cand_idx_to_pos[idx])
 
-# 组内 Z-score
+    beam_labels.append(mapped_pointer)
+    ...
+```
+
+**原因与收益**
+
+- 防止“silent bug”：数据和 embedding 对不齐却继续训练；
+- 确保 pointer 指向的 embedding 行真的是你想要的 candidate；
+- 如果 RL JSON 生成逻辑出错，会第一时间 crash，而不是浪费几个 GPU 小时。
+
+---
+
+### ST‑2：统一 reward 归一化逻辑，避免“二次 Z‑score”
+
+**相关位置**
+
+- Dataset 侧：
+  - `lever_lm/models/v3/dataset_v3.py`
+    - `RLBeamDatasetWithEmbedding.__getitem__`
+- GRPO 侧：
+  - `lever_lm/utils/reward_utils.py`
+    - `compute_group_relative_advantage`
+  - `lever_lm/workflows/grpo_post_train.py`
+    - 调用上述函数并计算 GRPO loss 的地方
+
+**当前 Dataset 行为（片段）**
+
+```python
+beam_rewards_raw = torch.tensor(beam_rewards, dtype=torch.float32)  # [num_candidates]
+
+# 归一化（组内Z-score）
 beam_rewards_normalized = beam_rewards_raw.clone()
 mean = beam_rewards_raw.mean()
 std = beam_rewards_raw.std()
@@ -247,466 +150,652 @@ if std > 1e-12:
     beam_rewards_normalized = (beam_rewards_raw - mean) / std
 
 result = {
-    "query_id": query_id,
-    "query_emb": query_emb,          # [d]
-    "cand_emb": cand_emb,            # [K, d]
-    "beam_labels": beam_labels_tensor,
+    ...
     "beam_rewards": beam_rewards_normalized if self.normalize_rewards else beam_rewards_raw,
     "beam_rewards_raw": beam_rewards_raw,
 }
-if beam_logprobs and all(lp is not None for lp in beam_logprobs):
-    result["beam_logprobs"] = torch.tensor(beam_logprobs, dtype=torch.float32)
 ```
 
-**与训练脚本的对应关系**（在 `GRPOTrainer` 里）：
-
-- RCE 阶段：
-  - 用 `beam_rewards_raw` 作为原始 reward，经过 softmax(·/τ) 构造 sample 权重；
-- GRPO 阶段：
-  - 用 `beam_rewards`（即组内 Z-score）作为 group-relative reward；
-  - 再经过 `compute_group_relative_advantage` / KL 约束等得到 loss。
-
-#### 2.3.1 这里的一个小坑：索引 fallback
+**GRPO 典型行为（推测）**
 
 ```python
-mapped_pointer = [self.cand_idx_to_pos.get(idx, idx) for idx in pointer]
+from lever_lm.utils.reward_utils import compute_group_relative_advantage
+
+advantages = compute_group_relative_advantage(
+    rewards=batch["beam_rewards"],   # [B, N]
+    normalize=True,
+    clip_range=5.0,
+)
 ```
 
-- 正常情况下：`pointer` 中的每个 idx 都是 `candidate_indices` 的一个元素，对应于 `candidate_embeddings` 的一行；
-- **问题**：一旦某个 idx _不在_ `candidate_indices` 里，就会 fallback 到自身 `idx`：
-  - 这会悄悄把 pointer 映射到错误的 embedding 行，但不会抛错，很难发现。
-
-**建议改成更严格的写法：**
+`compute_group_relative_advantage` 内部又是：
 
 ```python
-mapped_pointer = []
-for idx in pointer:
-    if idx not in self.cand_idx_to_pos:
-        raise KeyError(f"Pointer index {idx} not in candidate_indices (query_id={query_id})")
-    mapped_pointer.append(self.cand_idx_to_pos[idx])
+if normalize:
+    advantages = normalize_rewards_zscore(rewards, dim=-1)
+else:
+    advantages = rewards - rewards.mean(dim=-1, keepdim=True)
+advantages = clip_advantages(advantages, clip_range)
 ```
 
-这样如果 RL JSON 与 embedding 对不齐，会立即 crash，便于调试。
+**问题**
+
+- Dataset 已经对每个 query 组内做了一次 Z‑score；
+- GRPO 再对已经 Z‑score 的数据做一次 Z‑score；
+- `reward` 本身范围 [0,2]，组内差异小，经过两次归一化后，advantage 极小、差异被进一步抹平。
+
+**修改目标**
+
+- **只在一个地方做 Z‑score**；
+- 推荐：Dataset 只提供原始 reward，**GRPO 内统一做 group-relative advantage**。
+
+**推荐修改方案 A（最清晰）**
+
+1. 修改 `RLBeamDatasetWithEmbedding.__getitem__`：
+
+   ```python
+   beam_rewards_raw = torch.tensor(beam_rewards, dtype=torch.float32)
+   
+   result = {
+       "query_id": query_id,
+       "query_emb": query_emb,
+       "cand_emb": cand_emb,
+       "beam_labels": beam_labels_tensor,
+       # 不再提前归一化，直接返回原始 reward
+       "beam_rewards": beam_rewards_raw,
+       "beam_rewards_raw": beam_rewards_raw,
+   }
+   ```
+
+2. 在 GRPO 训练代码中（`grpo_post_train.py`），统一处理 advantage：
+
+   ```python
+   from lever_lm.utils.reward_utils import compute_group_relative_advantage
+   
+   rewards = batch["beam_rewards"]  # [B, num_candidates]
+   advantages = compute_group_relative_advantage(
+       rewards,
+       normalize=True,
+       clip_range=5.0,
+   )  # [B, num_candidates]
+   
+   ratio = torch.exp(log_probs_new - log_probs_old)  # [B, num_candidates]
+   loss = - (ratio * advantages).mean()
+   ```
+
+**收益**
+
+- 保证 reward 转 advantage 的逻辑只有一处，方便调参和 debug；
+- 避免对 already Z‑scored reward 再做一次 Z‑score，削弱有效梯度。
 
 ---
 
-### 2.4 训练流程（RCE + GRPO）逻辑回顾
+### ST‑3：禁止 RL reward 静默 fallback 到“字符串匹配”
 
-虽然你没贴 `grpo_post_train.py`，但根据之前的讨论和数据结构可以确定：
+**文件位置**
 
-1. **RCE 阶段**（Reward-Weighted CE 预热）：
-   - 从 dataloader 取：`query_emb`, `cand_emb`, `beam_labels`, `beam_rewards_raw`；
-   - pointer 模型前向得到每条候选 pointer 的 logit / log_prob；
-   - 使用 `softmax(beam_rewards_raw / τ)` 作为 sample 权重，对“选择正确 pointer 序列”的 CE 做加权；
-   - 目的是：先往“高 reward 的 pointer”方向收敛，稳定分布。
+- `lever_lm/models/v3/generate_rl_data.py`
+  - `compute_vqa_accuracy(...)`
+  - `generate_rl_data(...)` 内调用  
+  - `main()` 中的参数处理
 
-2. **GRPO 阶段**（Group-Relative PPO 风格更新）：
-   - 从 dataloader 取：`beam_rewards`（组内 Z-score）、`beam_labels`；
-   - 查 `old_log_probs`（SFT/v2 pointer 产生该 pointer 的 logprob）；
-   - 计算：
-     - `advantage = group_relative_advantage(beam_rewards)`；
-     - PPO 风格的 clip ratio；
-     - KL penalty（`compute_kl_penalty` + `adaptive_kl_beta`）；
-   - 更新策略，使其在每个 query 的候选 pointer group 内朝着高 reward 的 pointer 倾斜。
-
-整体逻辑与我们之前设计的“RCE + GRPO + group-relative reward + KL 自适应”是一致的。
-
----
-
-## 3. 为什么性能提升有限？
-
-结合代码与已有实验结果，可以归纳出以下几个核心原因。
-
-### 3.1 训练目标只覆盖了「2‑shot」，而评估看 1/2/3/4‑shot
-
-- 当前 RL 数据 **固定 `shot_num=2`**：
-  - pointer 永远是 `[i, j]`；
-  - correctness / reward 也是“用这两个 ICD 做 VQA 的得分”。
-- 于是 RL 实际在解的问题是：
-
-> 「在必须使用 2 条 ICD 的前提下，选哪两条能让 VQA 得分最高？」
-
-而你评估时：
-
-- 1‑shot：只用 pointer 的第一条 ICD；  
-- 2‑shot：用前两条 ICD；  
-- 3/4‑shot：通常是对 pointer 分数排序后取前 3/4 条 ICD。
-
-**后果：**
-
-1. **1‑shot 没被写进目标函数**  
-   - 模型完全可以选“作为 pair 很好，但第一条单独用一般”的 ICD → 1‑shot 表现变差是预期行为。
-
-2. **3/4‑shot 完全是 2‑shot 策略的副产品**  
-   - pointer 模型没被训练去考虑第三、第四条 ICD 的作用；  
-   - 在这种情况下，3/4‑shot 的改善只能是“从更好的 2‑shot 策略迁移来的顺带提升”，很难指望大幅度超越 v2。
-
-这解释了：为什么旧的 InfoScore 版 v3 在 shot≤2 明显优于 v2，而在 shot≥3 时不稳定甚至略差；新方案也很难在 3/4‑shot 上有显著提升。
-
----
-
-### 3.2 correctness reward 信号偏弱且噪声较大
-
-当前 reward：
-
-```text
-hard = vqa_correct ∈ {0,1}
-soft = vqa_acc_score ∈ [0,1]
-reward = hard + soft ∈ [0,2]
-```
-
-在很多 query 上会出现以下情况：
-
-- 所有 pointer 都是错的 → `hard = 0`；
-- `soft` 大多是 0 / 0.5（部分匹配），十几个候选之间差异极小；
-- 如果使用 fallback 字符串匹配，`0.5` 的判定本身就很脆弱（大小写、标点、数字表达等都可能导致误判）。
-
-然后：
-
-- 在 `RLBeamDatasetWithEmbedding` 中对同一 query 的 `beam_rewards_raw` 做 Z‑score；  
-- 在 GRPO 中又会对 rewards / advantages 做一次 group 拉平与裁剪。
-
-**结果**：
-
-- **组内 variance 很小，advantage 数值本身也很小**，梯度信号弱；  
-- 少量被错误高估的 pointer 可能因为噪声被当成“好样本”，RL 反而往错误方向调整。
-
-对比旧 InfoScore：
-
-- 尽管理论上有问题（只看增益、且在一些模型上全是负数），但在许多 query 上，InfoScore 数值差异较大：  
-  - 一条 pointer 的增益明显高于其他；  
-  - group 内的排序信息更清晰 → 有利于 GRPO 更新。
-
-这也是为什么你看到：**旧 v3_1layer 在 2‑shot 上比 v2 稳定优秀，而新 hard+soft correctness 方案在 2‑shot 上反而很难稳定领先**。
-
----
-
-### 3.3 RL 数据量与覆盖有限
-
-- 目前 RL 数据通常是在 OKVQA 中抽取 ~800 条 RandSampler query 来生成：
-  - 每个 query 8~12 个 pointer（beam + sample + random）；
-- 相比 v2 的 SFT 训练集，这只是一个很小的子集：
-  - 本身覆盖有限；
-  - pointer 候选都聚焦在 v2 的分布附近。
-
-在这样的 setting 下：
-
-- offline RL 的上限被强约束：只能在小范围内做 reweight；  
-- 遇到 reward 噪声或某些 query 本身极难时，很容易出现“微小的 overfit + 泛化收益被抵消”的情况；  
-- 在你用更大规模的评估集（200 / 400 条）做对比时，这种效应会进一步暴露出来。
-
----
-
-### 3.4 实现细节上的小风险叠加
-
-- `self.cand_idx_to_pos.get(idx, idx)` 的 fallback 可能导致 pointer embedding 错位，虽然概率不一定高；  
-- 生成 RL 数据时如果没传 VQA 标注文件，reward 全是字符串匹配打分，噪声显著；  
-- 多种 gen_method（beam / sample / random）混在一起，质量差异较大，如果没有做适当的筛选，也会放大噪声。
-
-这些细节单独看都不是“致命 bug”，但叠加在一起，容易进一步削弱 RL 的有效性。
-
----
-
-## 4. 推荐改动与优化方案（基于当前代码）
-
-以下改动都可以在现有实现的基础上 **增量修改**，不需要推倒重来。
-
-### 4.1 严格 pointer → candidate embedding 的索引映射
-
-**问题回顾**：
+**当前 `compute_vqa_accuracy` 行为（简化）**
 
 ```python
-mapped_pointer = [self.cand_idx_to_pos.get(idx, idx) for idx in pointer]
+def compute_vqa_accuracy(pred_answer, ground_truth_answers,
+                         question_id=None, val_ques_path=None, val_ann_path=None):
+    ...
+    if val_ques_path and val_ann_path and question_id:
+        try:
+            accuracy = compute_vqa_accuracy_metric(temp_result_file, val_ques_path, val_ann_path)
+            ...
+            return correct, acc_score
+        except Exception as e:
+            print(f"警告：使用文件方式计算准确率失败，回退到简单匹配: {e}")
+
+    # 简单匹配方式
+    pred_answer_lower = pred_answer.lower().strip()
+    gt_answers_lower = [ans.lower().strip() for ans in gt_answers_str]
+
+    if pred_answer_lower in gt_answers_lower:
+        return 1, 1.0
+    for gt_ans in gt_answers_lower:
+        if pred_answer_lower in gt_ans or gt_ans in pred_answer_lower:
+            return 1, 0.5
+
+    return 0, 0.0
 ```
 
-- 一旦 `idx` 不在 `candidate_indices` 里，就会 fallback 到自身 `idx`，默默选错 embedding 行。
+**问题**
 
-**建议修改**：
+- 如果：
+  - 没传 `val_ques_path/val_ann_path`，或
+  - question_id 对不上，或
+  - 官方评测脚本抛异常，
+- 就会直接回退到 **简单字符串匹配**，即 `in / contains`，容易给错误答案正 reward；
+- 这些 noisy reward 会直接喂给 RL，严重影响 RL 效果。
+
+**修改目标**
+
+- 生成 RL 数据时，要么：
+  - 用官方 VQA metric，得到可靠的 correctness；
+  - 要么直接报错，不生成这条数据；
+- 不再“悄悄回退”到字符串匹配。
+
+**推荐修改 A：在脚本入口强制要求评测文件**
+
+在 `main()` 中加入：
 
 ```python
-# 原代码片段（有隐式 fallback 风险）
-mapped_pointer = [self.cand_idx_to_pos.get(idx, idx) for idx in pointer]
-beam_labels.append(mapped_pointer)
+def main():
+    ...
+    # 对 VQA/OKVQA 场景强制要求传入评测文件
+    if "vqa" in args.dataset.lower():
+        if not args.val_ques_path or not args.val_ann_path:
+            raise ValueError(
+                "[generate_rl_data] For VQA RL data generation, "
+                "you must provide --val_ques_path and --val_ann_path "
+                "so that RL reward is computed by official VQA metric."
+            )
+    ...
 ```
 
-改成：
+**推荐修改 B：`compute_vqa_accuracy` 增加参数 `allow_fallback=False`**
 
 ```python
-mapped_pointer = []
-for idx in pointer:
-    if idx not in self.cand_idx_to_pos:
-        raise KeyError(
-            f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
-            f"(query_id={query_id})"
+def compute_vqa_accuracy(
+    pred_answer: str,
+    ground_truth_answers,
+    question_id: Optional[str] = None,
+    val_ques_path: Optional[str] = None,
+    val_ann_path: Optional[str] = None,
+    allow_fallback: bool = False,
+) -> Tuple[int, float]:
+    ...
+    if val_ques_path and val_ann_path and question_id:
+        try:
+            ...
+            return correct, acc_score
+        except Exception as e:
+            if not allow_fallback:
+                raise RuntimeError(
+                    f"[compute_vqa_accuracy] VQA file-based accuracy failed "
+                    f"for question_id={question_id}: {e}"
+                )
+            print(f"警告：使用文件方式计算准确率失败，回退到简单匹配: {e}")
+
+    if not allow_fallback:
+        # 缺失文件信息，而且不允许 fallback，直接报错
+        raise RuntimeError(
+            "[compute_vqa_accuracy] val_ques_path/val_ann_path/question_id "
+            "not provided, and allow_fallback=False"
         )
-    mapped_pointer.append(self.cand_idx_to_pos[idx])
 
-beam_labels.append(mapped_pointer)
+    # 真的要 fallback 时才走下面的字符串匹配
+    ...
 ```
 
-**收益：**
-
-- 一旦 RL JSON 与 candidate_embeddings 对不齐，当场报错 → 能快速修正数据管线问题；  
-- 避免在“embedding 错位”的情况下训练，排除一个潜在的隐形干扰源。
-
----
-
-### 4.2 确保 reward 真正等于「hard + soft correctness」
-
-当前实现已经具备这个能力，但需要注意以下几点：
-
-1. **构造 `RLBeamDatasetWithEmbedding` 时保持默认参数**：
-
-   ```python
-   ds = RLBeamDatasetWithEmbedding(
-       rl_data=rl_data,
-       query_embeddings=query_embeddings,
-       candidate_embeddings=candidate_embeddings,
-       candidate_indices=candidate_indices,
-       shot_num=2,
-       normalize_rewards=True,
-       reward_mode="hard_plus_soft",   # 默认
-       hard_weight=1.0,
-       soft_weight=1.0,
-       reward_alpha=0.0,               # 保证 legacy 分支不会生效
-       reward_beta=0.0,
-       reward_correctness_mode="01",
-       use_logprob=False,
-   )
-   ```
-
-2. **不要再把 beam_score / logprob_score 混入 reward**（除非刻意做 legacy 对照实验）；  
-3. 可以写一个小检查脚本，从 dataset 里取一个样本，验证：
-
-   ```python
-   # 伪代码
-   sample = ds[0]
-   print(sample["beam_rewards_raw"])  # 应该大致在 [0,2] 之间
-   ```
-
-   同时对照对应 pointer 的 `vqa_correct` / `vqa_acc_score`，确认：
-
-   ```text
-   beam_rewards_raw[k] ≈ vqa_correct[k] + vqa_acc_score[k]
-   ```
-
----
-
-### 4.3 生成 RL 数据时优先使用官方 VQA metric
-
-为了减少 reward 噪声，建议：
-
-1. **调用 `generate_rl_data.py` 时显式传入**：
-
-   ```bash
-   python -m lever_lm.models.v3.generate_rl_data \
-       --sft_ckpt path/to/v2_pointer.ckpt \
-       --beam_data path/to/beam_data.json \
-       --output_path path/to/rl_data.json \
-       --query_emb path/to/query_embeddings.pt \
-       --cand_emb path/to/candidate_embeddings.pt \
-       --vqa_model qwen2.5_vl_3B \
-       --dataset okvqa_local \
-       --val_ques_path path/to/vqav2_mscoco_val2014.json \
-       --val_ann_path path/to/vqav2_mscoco_val2014_annotations.json \
-       ...
-   ```
-
-2. 在 `compute_vqa_accuracy` 里可以做一些轻量 logging：
-   - 统计多少比例的 query 是通过文件方式打分，多少是 fallback；  
-   - 如果 fallback 比例过高，优先修 question_id 映射。
-
-3. **在这一阶段先不追求非常大的 RL 数据量**：
-   - 把一部分 query 做到“打分准确 + reward 可靠”，往往比在大规模 noisy reward 上训练要更值得。
-
----
-
-### 4.4 训练策略上的调整：先稳住 2‑shot，再谈多 shot
-
-在 reward 与数据确认没问题的前提下，可以优先做一些低成本的训练策略实验。
-
-#### 4.4.1 RCE-only baseline
-
-目标：**先看纯 RCE（没有 GRPO）的收益上限**。
-
-- 在 `grpo_post_train` 的配置里将 GRPO 关掉或极弱化：
-
-  - `RCE_EPOCHS`：保持 3~5（或略多）；  
-  - `GRPO_EPOCHS`：设为 0（或 1 作为 sanity check）；
-
-- 效果判断：
-  - 2‑shot 上是否能做到至少与 v2 持平，甚至略有提升；  
-  - 1/3/4‑shot 是否不至于明显崩坏。
-
-如果 RCE-only 就能达到一个“不错且稳定”的水平，那么 GRPO 的 PPO 部分可能需要大幅弱化（因为在小数据 + noisy reward 的 offline setting 下，强 PPO 很容易把策略拉离 SFT 再过拟合）。
-
-#### 4.4.2 减弱 GRPO 的力度 + 加强 KL 约束
-
-在确认 RCE 结果的基础上，如果仍希望引入少量 policy gradient，可以尝试：
-
-- 降低 GRPO learning rate（例如减半或 1/3）；  
-- 减少 GRPO epochs（例如 1~2 个 epoch）；  
-- 在 `compute_kl_penalty` / `adaptive_kl_beta` 相关超参里：
-  - 适当提高初始 `kl_beta`；  
-  - 收紧 KL target 区间 (`kl_target_min`, `kl_target_max`)，让策略不要偏离 v2 太远。
-
-目标：**把 GRPO 当作一个“轻柔的微调”，而不是强力重塑策略**。
-
----
-
-### 4.5 利用 `filter_gen_methods` 做 beam / sample / random 消融
-
-当前 RL 数据里混入了多种来源：
-
-- beam：通常质量较高；  
-- sample（不同温度）：质量参差不齐；  
-- random pointer：质量最差，但提供探索。
-
-你已经在 `RLBeamDatasetWithEmbedding` 里预留了：
+在 `generate_rl_data(...)` 中调用时：
 
 ```python
-filter_gen_methods: Optional[List[str]] = None
-
-if self.filter_gen_methods is not None:
-    pointer_candidates = [
-        c for c in pointer_candidates
-        if c.get("gen_method") in self.filter_gen_methods
-    ]
+correct, acc_score = compute_vqa_accuracy(
+    pred_answer=pred_answer,
+    ground_truth_answers=gt_answers,
+    question_id=question_id_str,
+    val_ques_path=val_ques_path,
+    val_ann_path=val_ann_path,
+    allow_fallback=False,      # 关键
+)
 ```
 
-建议用它做几组消融实验：
+**收益**
 
-1. **只用 beam**：
+- RL reward 始终来自正式 VQA metric，而不是粗糙字符串匹配；
+- 如果配置错误（路径 / question_id 等），会直接失败，而不是隐藏噪声。
+
+---
+
+### ST‑4：SFT 模型加载时打印结构与加载情况
+
+**文件位置**
+
+- `lever_lm/models/v3/generate_rl_data.py`
+  - `load_sft_model(checkpoint_path, device)`
+
+**当前实现（简化）**
+
+```python
+def load_sft_model(checkpoint_path: str, device: torch.device) -> PointerSelectorV3:
+    model = PointerSelectorV3(
+        d_model=512,  # 根据实际配置调整
+        K=64,
+        shot_num=2
+    )
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if 'model_state_dict' in ckpt:
+        state_dict = ckpt['model_state_dict']
+    elif 'state_dict' in ckpt:
+        state_dict = ckpt['state_dict']
+        state_dict = {k.replace('lever_lm.', ''): v for k, v in state_dict.items()}
+    else:
+        state_dict = ckpt
+
+    model.load_state_dict(state_dict, strict=False)
+    model.to(device)
+    model.eval()
+    return model
+```
+
+**问题**
+
+- `d_model/K/shot_num` 写死，如果未来 checkpoint 的结构改变或你换了别的配置：
+  - 因为 `strict=False`，不会抛错，只是 silent mismatch；
+  - RL 采样用的模型和你以为的不完全一样。
+
+**修改目标**
+
+- 至少让 train log 能看到：
+  - pointer 模型的结构；
+  - 有哪些 key 没加载上，哪些是“unexpected”。
+
+**推荐修改**
+
+```python
+def load_sft_model(checkpoint_path: str, device: torch.device) -> PointerSelectorV3:
+    model = PointerSelectorV3(
+        d_model=512,
+        K=64,
+        shot_num=2,
+    )
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "model_state_dict" in ckpt:
+        state_dict = ckpt["model_state_dict"]
+    elif "state_dict" in ckpt:
+        state_dict = ckpt["state_dict"]
+        state_dict = {k.replace("lever_lm.", ""): v for k, v in state_dict.items()}
+    else:
+        state_dict = ckpt
+
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+    print(f"[load_sft_model] loaded checkpoint from {checkpoint_path}")
+    print(f"[load_sft_model] PointerSelectorV3(d_model={model.d_model}, K={model.K}, shot_num={model.shot_num})")
+    print(f"[load_sft_model] missing_keys: {missing_keys}")
+    print(f"[load_sft_model] unexpected_keys: {unexpected_keys}")
+
+    model.to(device)
+    model.eval()
+    return model
+```
+
+**收益**
+
+- 后续如果你改了 pointer 架构或配置不一致，可以从 log 一眼看出；
+- 避免“RL 数据是用错误结构的模型采出来”的情况。
+
+---
+
+### ST‑5：GRPO 配置与日志显式化（方便做 RCE‑only / 轻 GRPO 对比）
+
+**文件位置**
+
+- `lever_lm/workflows/grpo_post_train.py`  
+  （或者你管理 GRPO 训练的主脚本）
+
+**问题**
+
+- 你已经在文档里做了多次实验（RCE‑only、新旧 v3 对比），但：
+  - GRPO/RCE 的 epoch 数、LR、KL β 等参数是否在 log 里明显打印；
+  - 长期回看实验结果时，很难快速对上“这轮实验具体跑的是什么配置”。
+
+**修改目标**
+
+- 把 GRPO/RCE 的关键配置（epoch/LR/KL β）写成结构体或清晰的配置块；
+- 每轮训练前打印到 log。
+
+**示例伪代码**
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class GRPOConfig:
+    rce_epochs: int = 5
+    rce_lr: float = 1e-4
+    grpo_epochs: int = 1
+    grpo_lr: float = 5e-5
+    kl_beta_init: float = 0.1
+    kl_target_min: float = 0.01
+    kl_target_max: float = 0.05
+
+def train_with_grpo(cfg: GRPOConfig, ...):
+    print(f"[GRPO] Config: {cfg}")
+
+    # RCE stage
+    for epoch in range(cfg.rce_epochs):
+        print(f"[GRPO] Stage=RCE epoch={epoch+1}/{cfg.rce_epochs}, lr={rce_optimizer.param_groups[0]['lr']}")
+        ...
+
+    # GRPO stage
+    kl_beta = cfg.kl_beta_init
+    for epoch in range(cfg.grpo_epochs):
+        print(f"[GRPO] Stage=GRPO epoch={epoch+1}/{cfg.grpo_epochs}, lr={grpo_optimizer.param_groups[0]['lr']}, kl_beta={kl_beta}")
+        ...
+```
+
+**收益**
+
+- 你在 `新强化学习结果.md` / `新方案评估.md` 里写的那些实验，可以 1:1 对上 log；
+- 后面要做系统的 RCE‑only vs RCE+GRPO 对比时，复现更容易。
+
+---
+
+## 2. 中期修改（需要重新生成 RL 数据或做更多实验）
+
+这些改动工程量会大一些，但都是在你现有 v3 框架基础上的增强，而不是推倒重来。
+
+---
+
+### MT‑1：多 shot 目标（同时优化 1/2/3/4‑shot）
+
+> 原因：当前 RL reward 完全基于 2‑shot correctness，而你的最终指标看 1/2/3/4‑shot → 目标不对齐。
+
+**设计思路**
+
+- 将 pointer 模型改为输出固定 4 个 ICD（`shot_num=4`）；
+
+- 对每条 pointer `[i1, i2, i3, i4]`：
+
+  - 构建 1‑shot prompt（只用 `i1`）；
+  - 2‑shot prompt（用 `i1 + i2`）；
+  - 3‑shot prompt；
+  - 4‑shot prompt；
+
+- 分别跑 VQA，得到 `R1, R2, R3, R4`（每个都是 `hard + soft`）；
+
+- 最终 RL reward 设置为：
+
+  \[
+  R_\text{total} = w_1 R_1 + w_2 R_2 + w_3 R_3 + w_4 R_4
+  \]
+
+  例如：`w1=0.2, w2=0.3, w3=0.2, w4=0.3`，可调。
+
+**需要改动的模块**
+
+1. **pointer 模型本身**
+
+   - 文件：`lever_lm/models/v3/pointer_selector_v3.py`
+   - 把 `shot_num` 从 2 改成 4，确保：
+     - forward 输出 `[B, shot_num]`；
+     - beam search / sample 函数都能输出长度为 4 的 pointer。
+
+2. **RL pointer 采样**
+
+   - 文件：`lever_lm/models/v3/rl_data_generation.py`
+     - `generate_pointer_candidates_for_query(...)` 的 pointer 长度改为 4。
+
+3. **RL 数据生成（compute 多 shot correctness）**
+
+   - 文件：`lever_lm/models/v3/generate_rl_data.py`
+     - 在 `generate_rl_data(...)` 中，对每条 pointer：
+
+   **伪代码示例：**
 
    ```python
-   ds_beam_only = RLBeamDatasetWithEmbedding(
-       rl_data=rl_data,
-       ...,
-       filter_gen_methods=["beam"],
+   pointer = c["pointer"]  # [i1, i2, i3, i4] (位置 index)
+   original_pointer = [candidate_indices[p] for p in pointer]  # 映射回数据集中的 id
+   
+   R_list = []
+   for k in [1, 2, 3, 4]:
+       ex_list = [dataset[original_pointer[j]] for j in range(k)]  # 前 k 条 ICD
+   
+       pred_answer = build_vqa_prompt_and_generate(
+           interface=vqa_model,
+           image=image,
+           question=question,
+           ex_list=ex_list,    # 需要把 ex1/ex2 改成通用 ex_list 版本
+           generation_kwargs=generation_kwargs,
+       )
+   
+       correct, acc_score = compute_vqa_accuracy(
+           pred_answer=pred_answer,
+           ground_truth_answers=gt_answers,
+           question_id=question_id_str,
+           val_ques_path=val_ques_path,
+           val_ann_path=val_ann_path,
+           allow_fallback=False,
+       )
+   
+       R_list.append(correct + acc_score)
+   
+   w = [0.2, 0.3, 0.2, 0.3]
+   R_total = sum(w_i * R_i for w_i, R_i in zip(w, R_list))
+   
+   c["vqa_R_list"]  = R_list
+   c["vqa_R_total"] = R_total
+   ```
+
+4. **RL Dataset 使用 `vqa_R_total`**
+
+   - 文件：`lever_lm/models/v3/dataset_v3.py`
+     - 在 `RLBeamDatasetWithEmbedding.__init__` 内：
+
+   ```python
+   for c in pointer_candidates:
+       pointer = c["pointer"]
+       ...
+       if "vqa_R_total" in c:
+           reward = float(c["vqa_R_total"])
+       else:
+           # 兼容旧格式：退回到 hard+soft（只有 2-shot）
+           reward = compute_reward_for_candidate(
+               vqa_correct=c.get("vqa_correct"),
+               vqa_acc_score=c.get("vqa_acc_score"),
+               reward_mode=self.reward_mode,
+               hard_weight=self.hard_weight,
+               soft_weight=self.soft_weight,
+               ...
+           )
+       beam_rewards.append(reward)
+   ```
+
+**收益**
+
+- RL reward 直接 encode 了你关心的 1/2/3/4‑shot 综合表现；
+- 避免 2‑shot 变好但 1/3/4‑shot 被“牺牲”的情况。
+
+---
+
+### MT‑2：按 query 粒度过滤“无信号” RL 数据
+
+**原因**
+
+- 有些 query 的所有 pointer 都错（reward 全是 0/非常小）；
+- 有些 query 的所有 pointer 得分都一样（没有排序意义）；
+- 这些 query 在 GRPO 里基本没用，反而增加噪声。
+
+**修改位置**
+
+- `lever_lm/models/v3/dataset_v3.py`
+  - `RLBeamDatasetWithEmbedding.__init__`
+
+**推荐过滤逻辑（伪代码）**
+
+```python
+for query_id_str, query_data in rl_data.items():
+    ...
+    # 生成 beam_rewards 列表后
+    if len(beam_rewards) == 0:
+        continue
+
+    rewards_tensor = torch.tensor(beam_rewards, dtype=torch.float32)
+    r_min, r_max = rewards_tensor.min().item(), rewards_tensor.max().item()
+
+    # 情况1: 全部 reward 一样 → 无排序信号
+    if r_max == r_min:
+        print(f"[RLBeamDataset] skip query_id={query_id} because all rewards equal={r_min:.4f}")
+        continue
+
+    # 情况2: reward 全部过小（例如都 < 0.1），几乎全错
+    if r_max < 0.1:
+        print(f"[RLBeamDataset] skip query_id={query_id} because rewards too small (max={r_max:.4f})")
+        continue
+
+    self.samples.append({
+        "query_id": query_id,
+        "beam_labels": beam_labels,
+        "beam_rewards": beam_rewards,
+        "beam_logprobs": beam_logprobs,
+    })
+```
+
+**收益**
+
+- GRPO 的梯度集中在真正“有 reward 差异”的 query 上；
+- 训练更稳定，噪声更小。
+
+---
+
+### MT‑3：对 beam / sample / random 做“带权训练”
+
+你已经设计了 `gen_method` 字段和 `filter_gen_methods` 参数。中期可以进一步：
+
+- 不是简单地“只用 beam / 只用 beam+sample”，而是：
+- 给不同 source 类型 (beam/sample/random) 赋予不同权重。
+
+**实现思路**
+
+1. **RL JSON：保持 `gen_method` 字段**  
+   （你已实现）
+
+2. **RL Dataset：把 `gen_method` 转成 numeric 权重**
+
+   - 文件：`lever_lm/models/v3/dataset_v3.py`
+     - `RLBeamDatasetWithEmbedding.__init__` 和 `__getitem__`：
+
+   ```python
+   method2weight = {"beam": 1.0, "sample": 0.7, "random": 0.4}
+   
+   self.samples.append({
+       ...
+       "beam_gen_methods": [c.get("gen_method", "beam") for c in pointer_candidates],
+   })
+   ```
+
+   在 `__getitem__`：
+
+   ```python
+   beam_gen_methods = sample["beam_gen_methods"]
+   method2weight = {"beam": 1.0, "sample": 0.7, "random": 0.4}
+   beam_src_weights = torch.tensor(
+       [method2weight.get(m, 0.5) for m in beam_gen_methods],
+       dtype=torch.float32,
    )
+   
+   result = {
+       ...
+       "beam_src_weights": beam_src_weights,  # [num_candidates]
+   }
    ```
 
-   - 看看在只保留“高质量候选”的情况下，RL 能否在 2‑shot 上稳定提升；
+3. **GRPO loss 中引入 source 权重**
 
-2. **beam + sample**：
+   - 在 `grpo_post_train.py` 的 GRPO 计算中：
 
    ```python
-   filter_gen_methods=["beam", "sample"]
+   rewards = batch["beam_rewards"]          # [B, N]
+   advantages = compute_group_relative_advantage(rewards, normalize=True, clip_range=5.0)
+   src_w = batch["beam_src_weights"]        # [B, N]
+   # 保证 src_w 形状可 broadcast
+   while src_w.dim() < advantages.dim():
+       src_w = src_w.unsqueeze(0)
+   
+   advantages = advantages * src_w
+   
+   ratio = torch.exp(log_probs_new - log_probs_old)
+   loss = - (ratio * advantages).mean()
    ```
 
-   - 允许一定程度的探索，但避免 random 极端噪声；
+**收益**
 
-3. **beam + sample + random**（当前配置的对照组）：
-
-   - 比较三种设置下的 2/3/4‑shot 表现，分析噪声来源。
-
-这样可以回答一个关键问题：
-
-> “是 reward 设计本身就不够区分，还是 random / 高温采样带来的劣质 pointer 把 RL 搅乱了？”
+- beam 通常质量更好，sample/random 有更多探索但也更 noisy；
+- 通过 source 权重可以让 RL 更偏向稳定的 beam，同时保留探索能力。
 
 ---
 
-### 4.6 多 shot RL：中长期可以考虑的方向
+### MT‑4：reward 形状微调 & KL 正则监控
 
-如果未来你非常在意 3/4‑shot 的表现，可以考虑真正把多 shot 写进训练目标。简述一个可行方向：
+在 `reward_utils.py` 中，你已经有：
 
-1. 固定 pointer 输出 4 条 ICD：`[i1, i2, i3, i4]`；  
-2. 对同一条 pointer 序列，分别算：
-   - `R1`：只用 `i1` 做 1‑shot VQA；  
-   - `R2`：用 `i1, i2` 做 2‑shot；  
-   - `R3`：用 `i1, i2, i3` 做 3‑shot；  
-   - `R4`：用 `i1, i2, i3, i4` 做 4‑shot；
-3. 定义综合 reward：
+- `clip_advantages(...)`
+- `compute_kl_penalty(...)`
+- `adaptive_kl_beta(...)`
 
-   ```text
-   R_total = w1 * R1 + w2 * R2 + w3 * R3 + w4 * R4
+**可以做的一些中期微调：**
+
+1. **将 reward 做一次组内中心化（减去均值）后再 clip**
+
+   在 GRPO 中：
+
+   ```python
+   rewards = batch["beam_rewards"]  # 原始 reward
+   # 组内中心化
+   centered = rewards - rewards.mean(dim=-1, keepdim=True)
+   advantages = clip_advantages(centered, clip_range=2.0)
    ```
 
-   - 如果你更看重 2‑shot：可以令 `w2` 最大，`w1,w3,w4` 稍小；  
-   - 这样 1/2/3/4‑shot 都会出现在目标函数里。
+2. **收紧 KL 目标范围**
 
-这条路线实现和算力成本都比较高（每个 pointer 要跑 4 次 VQA），更适合作为中长期优化方向。短期还是建议先把 **2‑shot RL 调到“至少不输 v2，部分 shot 稍有提升”**。
+   调整 `adaptive_kl_beta` 的默认参数，例如：
 
----
+   ```python
+   kl_target_min = 0.01
+   kl_target_max = 0.05
+   adjustment_factor = 1.5
+   ```
 
-## 5. 一个可执行的实验路线（建议）
+3. **周期性打印 KL & reward 统计**
 
-这里给出一个你可以直接照着走的 checklist：
+   在 GRPO 训练循环中：
 
-### Step 1：修代码小坑
+   ```python
+   if global_step % 100 == 0:
+       print(
+           f"[GRPO] step={global_step} KL={kl.item():.4f} "
+           f"kl_beta={kl_beta:.4f} reward_mean={rewards.mean().item():.4f} "
+           f"reward_std={rewards.std().item():.4f}"
+       )
+   ```
 
-- [ ] 修改 `RLBeamDatasetWithEmbedding` 的 pointer 映射，去掉 `.get(idx, idx)` fallback，改为显式 `KeyError`；  
-- [ ] 确认训练脚本中 `reward_mode="hard_plus_soft"`，`reward_alpha=reward_beta=0`，不再额外混入 beam_score/logprob。
+**收益**
 
-### Step 2：重新生成一版「干净」的 RL 数据
-
-- [ ] 调 `generate_rl_data.py` 时传入正确的 `--val_ques_path` / `--val_ann_path`；  
-- [ ] 检查日志，确认大部分 query 都是用官方 metric 打分的；  
-- [ ] 保存 RL JSON（如 `rl_data_qwen2.5_vl_3B_hard_soft.json`）。
-
-### Step 3：跑一个 RCE-only baseline
-
-- [ ] 用新的 RL JSON + 新的 `RLBeamDatasetWithEmbedding` 训练 pointer：
-  - RCE_EPOCHS：例如 5；  
-  - GRPO_EPOCHS：0；  
-- [ ] 在 100 / 200 / 400 / full dev set 上评估：
-  - 2‑shot：是否 ≥ v2；  
-  - 1/3/4‑shot：是否不显著退化。
-
-### Step 4：在 RCE-only 基础上加入轻量 GRPO
-
-- [ ] 在保持 RCE 配置不变的前提下，增加 1~2 个 epoch 的 GRPO：
-  - GRPO_LR 较小；  
-  - KL 约束稍强；  
-- [ ] 再次评估 1/2/3/4‑shot，比较相对 RCE-only 的变化。
-
-### Step 5：做 gen_method 消融
-
-- [ ] 使用 `filter_gen_methods=["beam"]` 训练一版，记录 1/2/3/4‑shot；  
-- [ ] 使用 `["beam", "sample"]` 再训练一版；  
-- [ ] 使用全量（beam+sample+random）做对照；  
-- [ ] 分析不同设置下 RL 效果的差异，确认噪声主要来源。
-
-### Step 6（可选）：可视化 reward 分布
-
-- [ ] 随机抽几个 query，画出不同 pointer 的：
-  - `vqa_correct` 分布；  
-  - `vqa_acc_score` 分布；  
-  - `reward = hard+soft` 分布；  
-- [ ] 观察：
-  - 有多少 query 所有 pointer 都错；  
-  - group 内 reward 差异有多大；  
-  - 正/负样本比例。
-
-这些数据会帮助你判断：
-
-> “是在 reward 设计本身就难以区分 pointer 质量，还是在已有的 RL 数据上，其实已经没有太多提升空间了？”
+- 让 reward/advantage 的数量级更可控，有利于稳定 PPO；
+- 通过 log 观察 RL 是否在“合理的 KL 区间”内更新。
 
 ---
 
-## 6. 总结
+## 3. 如何使用这份改造计划
 
-1. **实现上，你已经基本完成了从 InfoScore 增益 → 整条 pointer correctness（hard+soft）的迁移**；  
-2. 再往前走，瓶颈已经不再是“代码写错”，而是：
-   - 训练目标只优化 2‑shot，1/3/4‑shot 未被显式纳入；  
-   - correctness reward 在许多 query 上信号弱、噪声大；  
-   - RL 数据量与覆盖有限，offline RL 上限不高。
+一个可操作的执行顺序：
 
-3. **短期优先级建议：**
-   - 修掉 pointer 映射与 VQA metric 的小坑；  
-   - 重跑一版“干净”的 RL 数据；  
-   - 先在 RCE-only & 轻量 GRPO 的框架下，把 2‑shot 表现稳定做到不输 v2，并尽量减少 1/3/4‑shot 的退化。
+1. **先做短期修改（ST‑1～ST‑4）**
+   - 确保索引没问题、reward 归一化链路清晰、RL reward 所有来源都可信；
+   - 重新生成一版 RL 数据（至少一个 sampler + 一个模型）；
+   - 跑一版 **RCE‑only**（GRPO_EPOCHS=0）：
+     - 目标：2‑shot 至少不比 v2 差太多；  
+     - 1/3/4‑shot 不出现明显恶化。
+   - 在此基础上，加 1 个 epoch 的轻量 GRPO（小 LR、强 KL），观察是否带来微小提升。
 
-4. **中长期可以考虑的方向：**
-   - 多 shot RL（R1+R2+R3+R4 的综合 reward）；  
-   - 更精细的 reward 设计（例如对 soft score 做非线性拉伸、区分 easy/medium/hard query 等）；  
-   - 扩大 RL 数据覆盖（更多 query / 更丰富的 pointer 轨迹）。
+2. **等短期方案稳定后，再开始做中期增强（MT‑2 / MT‑3）**
+   - 先做 RL 数据质量过滤（按 query 粒度跳过无信号组）；
+   - 再做 beam/sample/random 的带权训练；
+   - 最后，如果你希望彻底对齐 1/2/3/4‑shot，再尝试 MT‑1 多 shot reward 设计（需要重跑 RL 数据，成本高一些）。
 
-你可以直接把这份 md 放到仓库的 `docs/` 目录，比如命名为：
+你可以直接把这份文档保存为：
 
-```text
-docs/LeverPlus_v3_RL_实现评估与改进计划.md
-```
+> `docs/rl_todo_short_mid_term.md`
 
-然后按第 5 节的 checklist 逐项推进。  
-如果后面你在某一阶段（比如“只用 beam 的 RL”）得到新的实验结果，也可以在这份文档下继续追加“实验记录”小节。
+然后每搞定一个条目，就在相应小节后加上「✅ 已完成 / 对应实验编号」，形成一个可追踪的路线图。
