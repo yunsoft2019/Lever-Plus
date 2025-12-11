@@ -343,7 +343,8 @@ class RLBeamDatasetWithEmbedding(Dataset):
         reward_beta: float = 0.0,
         reward_correctness_mode: str = "01",
         use_logprob: bool = False,
-        filter_gen_methods: Optional[List[str]] = None
+        filter_gen_methods: Optional[List[str]] = None,
+        skip_fallback_reward: bool = True  # 3.3.2: 是否跳过使用 fallback 方式计算的 RL 样本（默认 True，推荐启用）
     ):
         """
         初始化RL Beam数据集
@@ -367,6 +368,7 @@ class RLBeamDatasetWithEmbedding(Dataset):
             reward_correctness_mode: correctness模式（legacy 模式，"01" 或 "pm1"）
             use_logprob: 是否使用 logprob_score（legacy 模式）
             filter_gen_methods: 过滤的生成方法列表（如 ["beam", "sample"]），None表示不过滤
+            skip_fallback_reward: 是否跳过使用 fallback 方式计算的 RL 样本（默认 True，推荐启用）
         """
         Dataset.__init__(self)
         
@@ -380,6 +382,7 @@ class RLBeamDatasetWithEmbedding(Dataset):
         self.reward_correctness_mode = reward_correctness_mode
         self.use_logprob = use_logprob
         self.filter_gen_methods = filter_gen_methods
+        self.skip_fallback_reward = skip_fallback_reward  # 3.3.2: 保存参数
         
         self.query_embeddings = query_embeddings
         self.candidate_embeddings = candidate_embeddings
@@ -409,6 +412,10 @@ class RLBeamDatasetWithEmbedding(Dataset):
             beam_logprobs = []
             
             for c in pointer_candidates:
+                # 3.3.2: 如果要求跳过 fallback 样本
+                if self.skip_fallback_reward and c.get("vqa_eval_mode") == "fallback":
+                    continue
+                
                 pointer = c["pointer"]
                 assert len(pointer) == shot_num, f"pointer长度不匹配: {len(pointer)} vs {shot_num}"
                 
@@ -458,6 +465,10 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 # 保存logprob（用于old_log_probs）
                 beam_logprobs.append(c.get("logprob_score"))
             
+            # 3.3.2: 如果过滤后没有任何候选，跳过这个 query
+            if len(beam_labels) == 0:
+                continue
+            
             self.samples.append({
                 "query_id": query_id,
                 "beam_labels": beam_labels,  # [num_candidates, shot_num]
@@ -469,6 +480,10 @@ class RLBeamDatasetWithEmbedding(Dataset):
         print(f"  - 样本数: {len(self.samples)}")
         print(f"  - query_embeddings: {query_embeddings.shape}")
         print(f"  - candidate_embeddings: {candidate_embeddings.shape}")
+        if self.skip_fallback_reward:
+            print(f"  - skip_fallback_reward: True（已过滤 fallback 样本，只使用官方 VQA metric）")
+        else:
+            print(f"  - skip_fallback_reward: False（使用所有样本，包括 fallback）")
         print(f"  - reward_mode: {reward_mode}")
         if reward_mode == "hard_plus_soft":
             print(f"  - hard_weight: {hard_weight}, soft_weight: {soft_weight}")

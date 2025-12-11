@@ -259,6 +259,14 @@ bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_samp
 export RCE_EPOCHS=5 GRPO_EPOCHS=10 BATCH_SIZE=1
 export RCE_LR=1e-4 GRPO_LR=1e-5 KL_BETA=0.1 NUM_LAYERS=1
 bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+
+# 3.4: 使用归一化后的 reward（对比实验）
+export RCE_USE_NORMALIZED_REWARD=true
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
+
+# 3.5.2: GRPO 时冻结 backbone（保护 RCE 成果）
+export GRPO_EPOCHS=3 FREEZE_BACKBONE_IN_GRPO=true
+bash scripts/train_v3.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sampler qwen2.5_vl_3B
 ```
 
 **分步执行（高级用法）**：
@@ -276,14 +284,34 @@ bash scripts/export_embeddings.sh \
 # Step 1: 生成 RL 数据（每个采样器需要单独生成）
 bash scripts/generate_rl_data_for_sampler.sh rand_sampler qwen2.5_vl_3B okvqa_local cuda:0
 
-# Step 2: GRPO 训练
+# Step 2: GRPO 训练（默认使用 raw reward）
 CUDA_VISIBLE_DEVICES=0 python -m lever_lm.workflows.grpo_post_train \
-    --beam_data "results/okvqa/generated_data/rl_data_RandSampler.json" \
+    --beam_data "results/okvqa/generated_data/rl_data_RandSampler_Qwen2_5-VL-3B-Instruct.json" \
     --img_emb "results/okvqa/cache/query_embeddings.pt" \
     --sft_ckpt "results/okvqa/model_cpk/v2/xxx.ckpt" \
-    --output_dir "results/okvqa/model_cpk/v3_1layer" \
-    --rce_epochs 5 --grpo_epochs 10 --batch_size 1 \
+    --output_dir "results/okvqa/model_cpk/v3_test" \
+    --rce_epochs 5 --grpo_epochs 0 --batch_size 1 \
     --rce_lr 1e-4 --grpo_lr 1e-5 --kl_beta 0.1 --num_layers 1 \
+    --device cuda:0
+
+# Step 2 (3.4): 使用归一化后的 reward（对比实验）
+CUDA_VISIBLE_DEVICES=0 python -m lever_lm.workflows.grpo_post_train \
+    --beam_data "results/okvqa/generated_data/rl_data_RandSampler_Qwen2_5-VL-3B-Instruct.json" \
+    --img_emb "results/okvqa/cache/query_embeddings.pt" \
+    --sft_ckpt "results/okvqa/model_cpk/v2/xxx.ckpt" \
+    --output_dir "results/okvqa/model_cpk/v3_test_normalized" \
+    --rce_epochs 5 --grpo_epochs 0 --batch_size 1 \
+    --rce_use_normalized_reward \
+    --device cuda:0
+
+# Step 2 (3.5.2): GRPO 时冻结 backbone
+CUDA_VISIBLE_DEVICES=0 python -m lever_lm.workflows.grpo_post_train \
+    --beam_data "results/okvqa/generated_data/rl_data_RandSampler_Qwen2_5-VL-3B-Instruct.json" \
+    --img_emb "results/okvqa/cache/query_embeddings.pt" \
+    --sft_ckpt "results/okvqa/model_cpk/v2/xxx.ckpt" \
+    --output_dir "results/okvqa/model_cpk/v3_test_freeze" \
+    --rce_epochs 5 --grpo_epochs 3 --batch_size 1 \
+    --freeze_backbone_in_grpo \
     --device cuda:0
 ```
 
@@ -301,13 +329,15 @@ bash scripts/inference.sh vqa okvqa_local 0 query_img_text_icd_img_text rand_sam
 **GRPO 超参数说明**：
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--rce_epochs` | 5 | RCE预热轮数 |
-| `--grpo_epochs` | 10 | GRPO强化学习轮数 |
+| `--rce_epochs` | 5 | RCE预热轮数（推荐5，RCE-only baseline） |
+| `--grpo_epochs` | 0 | GRPO强化学习轮数（推荐0，即RCE-only模式；GRPO仅作为可选实验功能） |
 | `--rce_lr` | 1e-4 | RCE学习率 |
 | `--grpo_lr` | 1e-5 | GRPO学习率 |
 | `--kl_beta` | 0.1 | KL散度权重 |
 | `--num_layers` | 1 | Cross-Attention层数（与v2一致） |
 | `--batch_size` | 1 | 批次大小 |
+| `--rce_use_normalized_reward` | False | RCE训练时使用归一化后的reward（默认False，即使用raw reward） |
+| `--freeze_backbone_in_grpo` | False | GRPO时只训练pointer head，冻结投影层（input_proj, query_proj, cand_proj） |
 
 ### 2.4 基线
 

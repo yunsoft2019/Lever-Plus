@@ -81,10 +81,12 @@ class GRPOTrainer:
         self.rce_temp_start = rce_temp_start
         self.rce_temp_end = rce_temp_end
         self.use_top1_only = use_top1_only
+        self.rce_use_raw_reward = False  # 默认使用归一化后的 reward（与之前 rce_epoch5.pt 一致），将在 main() 中设置
         
         # GRPO配置
         self.grpo_epochs = grpo_epochs
         self.grpo_lr = grpo_lr
+        self.freeze_backbone_in_grpo = False  # 默认不冻结，将在 main() 中设置
         self.grpo_early_epochs = grpo_early_epochs
         self.grpo_early_top_k = grpo_early_top_k
         self.grpo_late_top_k = grpo_late_top_k
@@ -169,11 +171,31 @@ class GRPOTrainer:
             cand_emb = batch["cand_emb"].to(self.device)
             beam_labels = batch["beam_labels"].to(self.device)
             beam_rewards_raw = batch["beam_rewards_raw"].to(self.device)
+            beam_rewards = batch.get("beam_rewards", beam_rewards_raw).to(self.device)
+            
+            # 3.4: 根据开关选择使用 raw reward 还是归一化后的 reward
+            if self.rce_use_raw_reward:
+                reward_for_rce = beam_rewards_raw
+                reward_type = "raw"
+            else:
+                reward_for_rce = beam_rewards
+                reward_type = "normalized"
+            
+            # 调试信息：第一个batch打印reward统计
+            if epoch == 0 and batch_idx == 0:
+                print(f"\n[DEBUG] RCE训练使用的reward类型: {reward_type}")
+                print(f"  beam_rewards_raw: mean={beam_rewards_raw.mean().item():.6f}, std={beam_rewards_raw.std().item():.6f}, min={beam_rewards_raw.min().item():.6f}, max={beam_rewards_raw.max().item():.6f}")
+                print(f"  beam_rewards: mean={beam_rewards.mean().item():.6f}, std={beam_rewards.std().item():.6f}, min={beam_rewards.min().item():.6f}, max={beam_rewards.max().item():.6f}")
+                print(f"  reward_for_rce: mean={reward_for_rce.mean().item():.6f}, std={reward_for_rce.std().item():.6f}, min={reward_for_rce.min().item():.6f}, max={reward_for_rce.max().item():.6f}")
+                print(f"  reward是否相同: {torch.allclose(beam_rewards_raw, beam_rewards, atol=1e-6)}")
+                if not torch.allclose(beam_rewards_raw, beam_rewards, atol=1e-6):
+                    diff = (beam_rewards_raw - beam_rewards).abs()
+                    print(f"  最大差异: {diff.max().item():.6f}")
             
             optimizer.zero_grad()
             
             loss = self.model.compute_rce_loss(
-                query_emb, cand_emb, beam_labels, beam_rewards_raw,
+                query_emb, cand_emb, beam_labels, reward_for_rce,
                 temperature=temperature,
                 use_top1_only=self.use_top1_only
             )
@@ -429,10 +451,38 @@ class GRPOTrainer:
             print("\n" + "="*100)
             print("阶段3：GRPO训练")
             print("="*100)
+            
+            # 3.5.2: 如果开启冻结 backbone，只训练 pointer head
+            if self.freeze_backbone_in_grpo:
+                print("⚠️  冻结 backbone，GRPO 时只训练 pointer head（cross_attn_layers + attn_norms）")
+                print("   冻结的层：input_proj, query_proj, cand_proj")
+                
+                # 冻结投影层（backbone）
+                for name, param in self.model.named_parameters():
+                    if any(x in name for x in ["input_proj", "query_proj", "cand_proj"]):
+                        param.requires_grad = False
+                    else:
+                        param.requires_grad = True
+                
+                # 只优化需要训练的参数
+                trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+                trainable_count = sum(p.numel() for p in trainable_params)
+                total_count = sum(p.numel() for p in self.model.parameters())
+                print(f"   可训练参数: {trainable_count:,} / {total_count:,} ({100*trainable_count/total_count:.1f}%)")
+            else:
+                # 确保所有参数都可训练
+                for param in self.model.parameters():
+                    param.requires_grad = True
+            
             print(f"{'Epoch':>6} {'Train Loss':>12} {'Val Loss':>12} {'PPO Loss':>12} {'KL':>10} {'Adv Std':>10} {'Adv Max':>10} {'Beta':>8}")
             print("-"*100)
             
-            grpo_optimizer = AdamW(self.model.parameters(), lr=self.grpo_lr)
+            # 只优化需要训练的参数
+            if self.freeze_backbone_in_grpo:
+                trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+                grpo_optimizer = AdamW(trainable_params, lr=self.grpo_lr)
+            else:
+                grpo_optimizer = AdamW(self.model.parameters(), lr=self.grpo_lr)
             
             for epoch in range(self.grpo_epochs):
                 metrics = self.train_grpo_epoch(
@@ -483,6 +533,19 @@ def main():
     parser.add_argument("--reward_correctness_mode", type=str, default="01", choices=["01", "pm1"], help="Correctness模式（legacy模式）")
     parser.add_argument("--use_logprob", action="store_true", help="使用logprob_score而非beam_score（legacy模式）")
     parser.add_argument("--num_layers", type=int, default=1, help="Cross-Attention层数（默认1，与v2一致）")
+    # 3.4: RCE 使用 raw reward 开关
+    parser.add_argument("--rce_use_raw_reward", action="store_true",
+                        help="RCE 训练时使用原始 reward（beam_rewards_raw）。默认使用归一化后的 reward（beam_rewards，与 rce_epoch5.pt 一致）")
+    parser.add_argument("--rce_use_normalized_reward", action="store_true",
+                        help="RCE 训练时使用归一化后的 reward（beam_rewards，默认行为，与 rce_epoch5.pt 一致）")
+    # 3.5.2: GRPO 时冻结 backbone
+    parser.add_argument("--freeze_backbone_in_grpo", action="store_true",
+                        help="GRPO 时只训练 pointer head（cross_attn_layers + attn_norms），冻结投影层（input_proj, query_proj, cand_proj）")
+    # 3.3.3: 跳过 fallback 样本开关（默认启用）
+    # 注意：使用 action="store_false" 和 --no_skip_fallback_reward 来实现默认 True
+    parser.add_argument("--no_skip_fallback_reward", dest="skip_fallback_reward", action="store_false",
+                        help="禁用 skip_fallback_reward（使用所有样本，包括 fallback）。默认启用 skip_fallback_reward")
+    parser.set_defaults(skip_fallback_reward=True)  # 默认启用
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -593,7 +656,8 @@ def main():
             reward_alpha=args.reward_alpha,
             reward_beta=args.reward_beta,
             reward_correctness_mode=args.reward_correctness_mode,
-            use_logprob=args.use_logprob
+            use_logprob=args.use_logprob,
+            skip_fallback_reward=args.skip_fallback_reward  # 3.3.3: 传入 skip_fallback_reward 参数
         )
         val_dataset = RLBeamDatasetWithEmbedding(
             rl_data=val_data,
@@ -610,7 +674,8 @@ def main():
             reward_alpha=args.reward_alpha,
             reward_beta=args.reward_beta,
             reward_correctness_mode=args.reward_correctness_mode,
-            use_logprob=args.use_logprob
+            use_logprob=args.use_logprob,
+            skip_fallback_reward=args.skip_fallback_reward  # 3.3.3: 传入 skip_fallback_reward 参数
         )
         
         train_loader = DataLoader(
@@ -754,6 +819,28 @@ def main():
         use_top1_only=args.use_top1_only,
         save_dir=args.output_dir
     )
+    
+    # 3.4: 设置 RCE 使用 raw reward 开关
+    # 默认使用归一化后的 reward（与之前 rce_epoch5.pt 一致，这是最佳配置）
+    # 如果想测试 raw reward，可以传 --rce_use_raw_reward
+    if args.rce_use_raw_reward:
+        trainer.rce_use_raw_reward = True
+        print("✓ RCE 训练将使用原始 reward (beam_rewards_raw) [显式指定]")
+    else:
+        trainer.rce_use_raw_reward = False  # 默认使用归一化后的 reward（推荐）
+        if args.rce_use_normalized_reward:
+            print("✓ RCE 训练将使用归一化后的 reward (beam_rewards) [显式指定]")
+        else:
+            print("✓ RCE 训练将使用归一化后的 reward (beam_rewards) [默认，与 rce_epoch5.pt 一致]")
+    
+    # 3.5.2: 设置 GRPO 冻结 backbone 开关
+    trainer.freeze_backbone_in_grpo = args.freeze_backbone_in_grpo
+    
+    # 3.3.3: 打印 skip_fallback_reward 状态
+    if args.skip_fallback_reward:
+        print("✓ skip_fallback_reward 已启用（默认）：训练时将跳过 fallback 样本，只使用官方 VQA metric")
+    else:
+        print("⚠️  skip_fallback_reward 已禁用（使用了 --no_skip_fallback_reward）：训练时将使用所有样本（包括 fallback）")
     
     # 开始训练
     trainer.train()

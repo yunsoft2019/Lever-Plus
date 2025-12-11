@@ -186,11 +186,22 @@ elif [ "${version}" == "v3" ]; then
         # 检查是否已有对应的 v2format.ckpt 文件
         v2format_path="${v3_pt_path%.pt}_v2format.ckpt"
         
-        if [ -f "${v2format_path}" ]; then
-            echo "✓ v2format 文件已存在: $(basename ${v2format_path})"
-            echo "  直接使用已转换的 checkpoint，跳过转换步骤"
-            ckpt_path="${v2format_path}"
-        else
+        # 检查是否需要重新转换：如果 .pt 文件比 .ckpt 文件新，需要重新转换
+        if [ -f "${v2format_path}" ] && [ -f "${v3_pt_path}" ]; then
+            pt_time=$(stat -c %Y "${v3_pt_path}" 2>/dev/null || echo 0)
+            ckpt_time=$(stat -c %Y "${v2format_path}" 2>/dev/null || echo 0)
+            if [ "${pt_time}" -gt "${ckpt_time}" ]; then
+                echo "⚠️  v2format 文件已存在，但 .pt 文件更新，需要重新转换"
+                echo "  删除旧的 v2format 文件..."
+                rm -f "${v2format_path}"
+            else
+                echo "✓ v2format 文件已存在: $(basename ${v2format_path})"
+                echo "  直接使用已转换的 checkpoint，跳过转换步骤"
+                ckpt_path="${v2format_path}"
+            fi
+        fi
+        
+        if [ ! -f "${v2format_path}" ]; then
             echo "=========================================="
             echo "自动转换 v3 checkpoint 为 v2 格式..."
             echo "=========================================="
@@ -363,7 +374,7 @@ run_inference() {
                                 train.lever_lm.norm=false \
                                 train.lever_lm.freeze_prefix_list="[img_model,sen_model]" \
                                 train.lever_lm.adapter=true \
-                                infer_model=${infer_model} \
+                                infer_model="${infer_model}" \
                                 infer_model.load_from_local=false
     fi
     

@@ -613,6 +613,7 @@ def generate_rl_data(
                 c["vqa_pred_answer"] = pred_answer
                 c["vqa_correct"] = correct
                 c["vqa_acc_score"] = acc_score
+                c["vqa_eval_mode"] = "file" if used_file_metric else "fallback"  # 3.3.1: 标记 reward 质量来源
                 
             except Exception as e:
                 print(f"警告：计算 correctness 失败 (query_id={query_id}, pointer={pointer}): {e}")
@@ -622,6 +623,7 @@ def generate_rl_data(
                 c["vqa_pred_answer"] = ""
                 c["vqa_correct"] = 0
                 c["vqa_acc_score"] = 0.0
+                c["vqa_eval_mode"] = "fallback"  # 3.3.1: 异常情况标记为 fallback
             
             pointer_candidates_with_correctness.append(c)
         
