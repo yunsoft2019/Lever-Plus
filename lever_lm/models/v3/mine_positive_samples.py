@@ -20,37 +20,81 @@ def get_vqa_interface(model_name: str, device: str = "cuda:0"):
     from open_mmicl.interface.qwen2vl_interface import Qwen2VLInterface
     return Qwen2VLInterface(
         model_name=model_name,
+        load_from_local=False,
+        precision="bf16",
         device=device,
+        prompt_template="Question:<Q> Short answer:<A>",
+        column_token_map={"question": "<Q>", "answer": "<A>"},
+        instruction="",
+        icd_join_char="\n",
+        image_field="image",
+        label_field="answer",
     )
 
 
 def load_okvqa_dataset(cfg_or_path: str = None):
-    """加载 OKVQA 数据集"""
-    import datasets
-    from PIL import Image
+    """加载 OKVQA 数据集
+    
+    使用项目中已有的数据加载方式，与 generate_rl_data.py 保持一致
+    """
+    from collections import Counter
+    from datasets import load_dataset
     import os
     
-    # 从环境变量获取路径
-    okvqa_path = os.environ.get("OKVQA_PATH", "/mnt/share/yiyun/Datasets/okvqa")
-    coco_path = os.environ.get("COCO_PATH", "/mnt/share/yiyun/Datasets/coco")
+    # 获取项目根目录
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     
-    train_json = f"{okvqa_path}/okvqa_hf/vqav2_mscoco_train2014.json"
+    # 数据路径
+    train_json = os.path.join(project_root, "datasets/okvqa/okvqa_hf/vqav2_mscoco_train2014.json")
+    # COCO 路径：优先使用环境变量，否则使用项目内的 datasets/mscoco
+    coco_path = os.environ.get("COCO_PATH", os.path.join(project_root, "datasets/mscoco"))
     train_img_dir = f"{coco_path}/mscoco2014/train2014"
     
-    with open(train_json, "r") as f:
-        data = json.load(f)
+    # 使用 HuggingFace datasets 加载
+    ds = load_dataset("json", data_files={"train": train_json}, field="annotations", split="train")
+    ds = ds.sort("question_id")
     
-    # 构建数据集
+    # 添加图像路径
+    def add_image_path(batch, idx):
+        filenames = [f"COCO_train2014_{img_id:012d}.jpg" for img_id in batch["image_id"]]
+        batch["image_path"] = [os.path.join(train_img_dir, fn) for fn in filenames]
+        batch["idx"] = idx
+        return batch
+    
+    ds = ds.map(add_image_path, batched=True, with_indices=True, num_proc=4)
+    
+    # 从 answers 列表中提取答案
+    def process_answers(batch):
+        answer_list = []
+        answers_list = []
+        for answers in batch["answers"]:
+            # answers 格式: [{"answer": "yes", "answer_confidence": "yes"}, ...]
+            answer_texts = [ans["answer"] for ans in answers]
+            answers_list.append(answer_texts)
+            # 选择出现次数最多的作为主答案
+            if answer_texts:
+                most_common = Counter(answer_texts).most_common(1)[0][0]
+            else:
+                most_common = ""
+            answer_list.append(most_common)
+        batch["answer"] = answer_list
+        batch["answer_list"] = answers_list  # 保留所有答案用于 VQA 评估
+        return batch
+    
+    ds = ds.map(process_answers, batched=True, num_proc=4)
+    
+    # 转换为列表格式
     ds_list = []
-    for item in data:
-        img_path = os.path.join(train_img_dir, item["image"])
+    for i in range(len(ds)):
+        item = ds[i]
         ds_list.append({
             "question": item["question"],
             "answer": item["answer"],
-            "answers": item.get("answers", [item["answer"]]),
-            "image_path": img_path,
-            "image_id": item.get("image_id", 0),
-            "question_id": item.get("question_id", 0),
+            "answers": item["answer_list"],  # 所有答案列表
+            "image_path": item["image_path"],
+            "image_id": item["image_id"],
+            "question_id": item["question_id"],
+            "idx": item["idx"],
         })
     
     return ds_list
@@ -62,9 +106,12 @@ def build_vqa_prompt_2shot(
     query_question: str,
     ex1: Dict,
     ex2: Optional[Dict] = None,
+    generation_kwargs: Optional[Dict] = None,
 ) -> str:
     """
     构建 2-shot VQA prompt 并生成答案
+    
+    使用与 generate_rl_data.py 相同的方式
     
     Args:
         interface: VQA 推理接口
@@ -72,43 +119,100 @@ def build_vqa_prompt_2shot(
         query_question: query 问题
         ex1: 第一个 ICD 样本
         ex2: 第二个 ICD 样本（可选）
+        generation_kwargs: 生成参数（可选）
         
     Returns:
         生成的答案
     """
     from PIL import Image
+    from open_mmicl.metrics.vqa_metrics import postprocess_vqa_generation
     
-    # 构建 few-shot examples
-    examples = []
+    if generation_kwargs is None:
+        generation_kwargs = {"max_new_tokens": 10}
     
-    if ex1:
-        ex1_img = Image.open(ex1["image_path"]).convert("RGB")
-        examples.append({
-            "image": ex1_img,
-            "question": ex1["question"],
-            "answer": ex1["answer"],
-        })
+    # 加载图像
+    query_img = Image.open(query_image_path).convert("RGB")
+    ex1_img = Image.open(ex1["image_path"]).convert("RGB")
+    
+    # 构造 data_sample_list（示例 + 查询）
+    data_sample_list = [
+        {"image": ex1_img, "question": ex1["question"], "answer": ex1["answer"]},
+    ]
     
     if ex2:
         ex2_img = Image.open(ex2["image_path"]).convert("RGB")
-        examples.append({
-            "image": ex2_img,
-            "question": ex2["question"],
-            "answer": ex2["answer"],
+        data_sample_list.append({
+            "image": ex2_img, "question": ex2["question"], "answer": ex2["answer"]
         })
     
-    # 加载 query 图像
-    query_img = Image.open(query_image_path).convert("RGB")
+    # 添加查询
+    data_sample_list.append({"image": query_img, "question": query_question})
     
-    # 调用接口生成答案
-    pred_answer = interface.generate_with_icl(
-        query_image=query_img,
-        query_question=query_question,
-        examples=examples,
-        max_new_tokens=10,
+    # 使用 transfer_prompts 转换为 prompt 格式
+    prompts = interface.transfer_prompts(
+        [data_sample_list], is_last_for_generation=True
     )
     
-    return pred_answer
+    # 使用 prepare_input 转换为 tensor 格式
+    input_dict = interface.prepare_input(
+        prompts, is_last_for_generation=True
+    )
+    
+    # 处理 BatchFeature 对象
+    if hasattr(input_dict, 'data'):
+        input_dict = dict(input_dict.data)
+    elif not isinstance(input_dict, dict):
+        input_dict = dict(input_dict)
+    
+    # 将数据移动到设备
+    data = {k: v.to(interface.device) if isinstance(v, torch.Tensor) else v 
+           for k, v in input_dict.items()}
+    
+    # 处理 Qwen2.5-VL 的特殊情况
+    if 'image_grid_thw' in data:
+        if data['image_grid_thw'].dim() == 3 and data['image_grid_thw'].shape[0] == 1:
+            data['image_grid_thw'] = data['image_grid_thw'].squeeze(0)
+            if 'image_nums' in data:
+                if isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() > 1:
+                    data['image_nums'] = data['image_nums'][0:1]
+                elif isinstance(data['image_nums'], list) and len(data['image_nums']) > 0:
+                    data['image_nums'] = torch.tensor([data['image_nums'][0]], dtype=torch.long)
+        elif data['image_grid_thw'].dim() == 2:
+            if 'image_nums' not in data:
+                num_images = data['image_grid_thw'].shape[0]
+                data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+    
+    # 获取 prompt 长度
+    prompt_len = int(data["attention_mask"].shape[1])
+    
+    # 生成答案
+    with torch.inference_mode():
+        outputs = interface.generate(
+            **data,
+            eos_token_id=interface.tokenizer.eos_token_id,
+            pad_token_id=interface.tokenizer.pad_token_id,
+            **generation_kwargs,
+        )
+    
+    # 解码生成结果
+    if isinstance(outputs, torch.Tensor):
+        outputs = outputs.tolist()
+    if not isinstance(outputs, list):
+        outputs = [outputs]
+    if len(outputs) > 0 and not isinstance(outputs[0], list):
+        outputs = [outputs]
+    
+    # 解码：只取 prompt 之后的部分
+    generated = interface.tokenizer.batch_decode(
+        [output[prompt_len:] for output in outputs],
+        skip_special_tokens=True,
+    )
+    
+    # 后处理得到 answer
+    prediction = generated[0] if generated else ""
+    answer = postprocess_vqa_generation(prediction)
+    
+    return answer
 
 
 def compute_vqa_accuracy_simple(
