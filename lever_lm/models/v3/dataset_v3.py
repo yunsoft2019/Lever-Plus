@@ -469,6 +469,10 @@ class RLBeamDatasetWithEmbedding(Dataset):
             if len(beam_labels) == 0:
                 continue
             
+            # 注意：不再过滤"所有 reward 相同"的 query
+            # 因为数据中大部分 query 的所有候选都答错（vqa_correct=0, vqa_acc_score=0）
+            # 如果过滤会导致样本太少，无法训练
+            
             self.samples.append({
                 "query_id": query_id,
                 "beam_labels": beam_labels,  # [num_candidates, shot_num]

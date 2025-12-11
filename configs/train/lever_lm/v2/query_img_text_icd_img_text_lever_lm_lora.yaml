@@ -11,7 +11,7 @@ config:
   hidden_dim: 256
   num_heads: 1
   attn_dropout: 0.1
-  num_layers: 3
+  num_layers: 1
 
 # 适配器参数
 clip_name: openai/clip-vit-base-patch32

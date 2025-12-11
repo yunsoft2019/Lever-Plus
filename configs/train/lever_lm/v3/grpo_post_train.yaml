@@ -12,7 +12,7 @@ model:
   hidden_dim: 256
   num_heads: 1
   attn_dropout: 0.1
-  num_layers: 3
+  num_layers: 1
   # V3新增参数
   clip_epsilon: 0.2
   kl_beta: 0.1

@@ -25,11 +25,13 @@
 #   GRPO_LR: GRPO 学习率（默认: 5e-6，轻量 GRPO）
 #   KL_BETA: KL 散度权重（默认: 0.15，稍强的 KL 约束）
 #   NUM_LAYERS: Cross-Attention 层数（默认: 1，与 v2 一致）
-#   REWARD_MODE: Reward 模式（默认: hard_plus_soft，符合文档推荐）
+#   REWARD_MODE: Reward 模式（默认: hard_plus_soft）
+#     - hard_plus_soft: reward = vqa_correct + vqa_acc_score，范围 [0, 2]
+#     - separated: 正样本 [2,3]，负样本 [0,1]（需要数据有足够正样本）
 #   HARD_WEIGHT: Hard correctness 权重（默认: 1.0）
 #   SOFT_WEIGHT: Soft correctness 权重（默认: 1.0）
 #   USE_RANK_ADVANTAGE: 是否使用排名归一化计算 advantage（默认: false）
-#   RCE_USE_RAW_REWARD: RCE 使用原始 reward（默认: false，即使用归一化后的 reward，与 rce_epoch5.pt 一致）
+#   RCE_USE_RAW_REWARD: RCE 使用原始 reward（默认: true，保留正负样本的绝对差异）
 #   FREEZE_BACKBONE_IN_GRPO: GRPO 时冻结 backbone（默认: false）
 #   SKIP_FALLBACK_REWARD: 跳过使用 fallback 方式计算的 RL 样本（默认: true，推荐启用；传 false 可禁用）
 #
@@ -148,12 +150,15 @@ rce_lr=${RCE_LR:-1e-4}
 grpo_lr=${GRPO_LR:-5e-6}  # 轻量 GRPO 使用更小的学习率
 kl_beta=${KL_BETA:-0.15}  # 稍强的 KL 约束
 num_layers=${NUM_LAYERS:-1}
-# 新的 Reward 参数（根据文档推荐，使用 hard_plus_soft）
+# 新的 Reward 参数
+# 注意：separated 模式需要数据中有足够的正样本（vqa_correct=1），否则 reward 全是 0
+# 当前数据正确率较低，建议使用 hard_plus_soft 模式
 reward_mode=${REWARD_MODE:-hard_plus_soft}
 hard_weight=${HARD_WEIGHT:-1.0}
 soft_weight=${SOFT_WEIGHT:-1.0}
 # 3.4、3.5.2 和 3.3.3 新增参数
-rce_use_raw_reward=${RCE_USE_RAW_REWARD:-false}
+# 默认使用 raw reward，保留正负样本的绝对差异
+rce_use_raw_reward=${RCE_USE_RAW_REWARD:-true}
 freeze_backbone_in_grpo=${FREEZE_BACKBONE_IN_GRPO:-false}
 skip_fallback_reward=${SKIP_FALLBACK_REWARD:-true}  # 默认启用，传 false 可禁用
 
