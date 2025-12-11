@@ -546,6 +546,9 @@ def main():
     parser.add_argument("--no_skip_fallback_reward", dest="skip_fallback_reward", action="store_false",
                         help="禁用 skip_fallback_reward（使用所有样本，包括 fallback）。默认启用 skip_fallback_reward")
     parser.set_defaults(skip_fallback_reward=True)  # 默认启用
+    # 正样本挖掘：只保留至少有一个正样本的 query
+    parser.add_argument("--require_positive_query", action="store_true",
+                        help="只保留至少有一个正样本（vqa_correct=1）的 query 进行训练。用于正样本挖掘后的高质量数据训练")
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -657,7 +660,8 @@ def main():
             reward_beta=args.reward_beta,
             reward_correctness_mode=args.reward_correctness_mode,
             use_logprob=args.use_logprob,
-            skip_fallback_reward=args.skip_fallback_reward  # 3.3.3: 传入 skip_fallback_reward 参数
+            skip_fallback_reward=args.skip_fallback_reward,  # 3.3.3: 传入 skip_fallback_reward 参数
+            require_positive_query=args.require_positive_query  # 正样本挖掘：只保留有正样本的 query
         )
         val_dataset = RLBeamDatasetWithEmbedding(
             rl_data=val_data,
@@ -675,7 +679,8 @@ def main():
             reward_beta=args.reward_beta,
             reward_correctness_mode=args.reward_correctness_mode,
             use_logprob=args.use_logprob,
-            skip_fallback_reward=args.skip_fallback_reward  # 3.3.3: 传入 skip_fallback_reward 参数
+            skip_fallback_reward=args.skip_fallback_reward,  # 3.3.3: 传入 skip_fallback_reward 参数
+            require_positive_query=args.require_positive_query  # 正样本挖掘：只保留有正样本的 query
         )
         
         train_loader = DataLoader(
@@ -841,6 +846,12 @@ def main():
         print("✓ skip_fallback_reward 已启用（默认）：训练时将跳过 fallback 样本，只使用官方 VQA metric")
     else:
         print("⚠️  skip_fallback_reward 已禁用（使用了 --no_skip_fallback_reward）：训练时将使用所有样本（包括 fallback）")
+    
+    # 打印 require_positive_query 状态
+    if args.require_positive_query:
+        print("✓ require_positive_query 已启用：只保留至少有一个正样本（vqa_correct=1）的 query 进行训练")
+    else:
+        print("✓ require_positive_query 未启用（默认）：使用所有 query 进行训练")
     
     # 开始训练
     trainer.train()

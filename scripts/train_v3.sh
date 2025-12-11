@@ -34,6 +34,7 @@
 #   RCE_USE_RAW_REWARD: RCE 使用原始 reward（默认: true，保留正负样本的绝对差异）
 #   FREEZE_BACKBONE_IN_GRPO: GRPO 时冻结 backbone（默认: false）
 #   SKIP_FALLBACK_REWARD: 跳过使用 fallback 方式计算的 RL 样本（默认: true，推荐启用；传 false 可禁用）
+#   REQUIRE_POSITIVE_QUERY: 只保留至少有一个正样本的 query（默认: false；传 true 可启用，用于正样本挖掘后的高质量数据训练）
 #
 # 实验路线（根据 LeverPlus_v3_RL_plan_cn.md）:
 #   Step 3 (RCE-only baseline): export GRPO_EPOCHS=0 && bash scripts/train_v3.sh ...（默认配置，使用归一化reward）
@@ -161,6 +162,8 @@ soft_weight=${SOFT_WEIGHT:-1.0}
 rce_use_raw_reward=${RCE_USE_RAW_REWARD:-true}
 freeze_backbone_in_grpo=${FREEZE_BACKBONE_IN_GRPO:-false}
 skip_fallback_reward=${SKIP_FALLBACK_REWARD:-true}  # 默认启用，传 false 可禁用
+# 正样本挖掘：只保留至少有一个正样本的 query
+require_positive_query=${REQUIRE_POSITIVE_QUERY:-false}  # 默认禁用，传 true 可启用
 
 echo "=========================================="
 echo "V3 训练配置"
@@ -200,6 +203,9 @@ if [ "${skip_fallback_reward}" == "true" ]; then
     echo "  Skip Fallback: 跳过 fallback 样本，只使用官方 VQA metric [默认启用]"
 else
     echo "  Skip Fallback: 已禁用（使用所有样本，包括 fallback）"
+fi
+if [ "${require_positive_query}" == "true" ]; then
+    echo "  Require Positive Query: 只保留有正样本的 query [已启用]"
 fi
 echo "=========================================="
 
@@ -331,6 +337,11 @@ fi
 # 3.3.3: skip_fallback_reward 默认启用，只有禁用时才传参数
 if [ "${skip_fallback_reward}" == "false" ]; then
     train_cmd="${train_cmd} --no_skip_fallback_reward"
+fi
+
+# 正样本挖掘：只保留有正样本的 query
+if [ "${require_positive_query}" == "true" ]; then
+    train_cmd="${train_cmd} --require_positive_query"
 fi
 
 # 添加设备参数

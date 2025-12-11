@@ -344,7 +344,8 @@ class RLBeamDatasetWithEmbedding(Dataset):
         reward_correctness_mode: str = "01",
         use_logprob: bool = False,
         filter_gen_methods: Optional[List[str]] = None,
-        skip_fallback_reward: bool = True  # 3.3.2: 是否跳过使用 fallback 方式计算的 RL 样本（默认 True，推荐启用）
+        skip_fallback_reward: bool = True,  # 3.3.2: 是否跳过使用 fallback 方式计算的 RL 样本（默认 True，推荐启用）
+        require_positive_query: bool = False  # 是否只保留至少有一个正样本（vqa_correct=1）的 query
     ):
         """
         初始化RL Beam数据集
@@ -383,6 +384,7 @@ class RLBeamDatasetWithEmbedding(Dataset):
         self.use_logprob = use_logprob
         self.filter_gen_methods = filter_gen_methods
         self.skip_fallback_reward = skip_fallback_reward  # 3.3.2: 保存参数
+        self.require_positive_query = require_positive_query  # 是否只保留有正样本的 query
         
         self.query_embeddings = query_embeddings
         self.candidate_embeddings = candidate_embeddings
@@ -469,9 +471,12 @@ class RLBeamDatasetWithEmbedding(Dataset):
             if len(beam_labels) == 0:
                 continue
             
-            # 注意：不再过滤"所有 reward 相同"的 query
-            # 因为数据中大部分 query 的所有候选都答错（vqa_correct=0, vqa_acc_score=0）
-            # 如果过滤会导致样本太少，无法训练
+            # 如果要求只保留有正样本的 query
+            if self.require_positive_query:
+                # 检查是否有任何正样本（reward >= 1.0 表示 vqa_correct=1）
+                has_positive = any(r >= 1.0 for r in beam_rewards)
+                if not has_positive:
+                    continue
             
             self.samples.append({
                 "query_id": query_id,
@@ -488,6 +493,10 @@ class RLBeamDatasetWithEmbedding(Dataset):
             print(f"  - skip_fallback_reward: True（已过滤 fallback 样本，只使用官方 VQA metric）")
         else:
             print(f"  - skip_fallback_reward: False（使用所有样本，包括 fallback）")
+        if self.require_positive_query:
+            print(f"  - require_positive_query: True（只保留至少有一个正样本的 query）")
+        else:
+            print(f"  - require_positive_query: False（使用所有 query）")
         print(f"  - reward_mode: {reward_mode}")
         if reward_mode == "hard_plus_soft":
             print(f"  - hard_weight: {hard_weight}, soft_weight: {soft_weight}")
