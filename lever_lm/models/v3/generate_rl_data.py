@@ -32,8 +32,15 @@ import sys
 import contextlib
 from io import StringIO
 from typing import Dict, List, Optional, Tuple
+from collections import Counter
 from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
+
+# 优化：使用/mnt/share作为临时文件目录（有更多空间）
+# 如果/mnt/share可用，使用它；否则使用系统默认的/tmp
+TEMP_DIR = "/mnt/share/yiyun/Projects/Lever-Plus/tmp" if os.path.exists("/mnt/share") else None
+if TEMP_DIR:
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
 from lever_lm.models.v3.rl_data_generation import (
     generate_pointer_candidates_for_query,
@@ -148,6 +155,8 @@ def load_vqa_model(model_name: str, device: torch.device, cfg: Optional[DictConf
     
     if cfg is None:
         # 创建默认配置
+        # 重要：需要包含system_prompt，确保传递给Qwen2.5-VL模型
+        # system_prompt要求模型使用简短答案格式（1-3个token）
         cfg = OmegaConf.create({
             "infer_model": {
                 "name": infer_model_name,  # 使用映射后的名称
@@ -155,6 +164,7 @@ def load_vqa_model(model_name: str, device: torch.device, cfg: Optional[DictConf
                 "load_from_local": False,
                 "precision": "bf16",
                 "icd_join_char": " ",
+                "system_prompt": "In the upcoming task, you will see four sets of dialogues, each containing two roles: user and assistant. The user is the questioner, who provides an image and asks a question based on it; the assistant is the responder, who answers according to the image and question provided by the user. Afterward, you will receive an image and a question from the user. Please act as the assistant and answer based on the four previous dialogue sets and your own knowledge. Strictly follow the answering format: if the examples use only one or two keywords, your reply must also use only one or two keywords; if the examples contain no more than three tokens, your reply must not exceed three tokens either.",
             },
             "task": {
                 "template": "Question: {question} Short answer: {answer}",  # VQA 任务的字符串模板
@@ -172,6 +182,103 @@ def load_vqa_model(model_name: str, device: torch.device, cfg: Optional[DictConf
     # 使用 init_interface 加载模型
     interface = init_interface(cfg, device=device)
     return interface
+
+
+def build_vqa_prompt_with_label(
+    interface,
+    image,
+    question: str,
+    answer: str,
+    ex1: Dict,
+    ex2: Dict
+) -> Dict:
+    """
+    构建带标签的 VQA prompt（用于计算 cond_prob）
+    
+    按照 2025-12-13需求.md P1需求4 的要求：
+    - 用于计算 vqa_gt_prob（GT 概率）
+    - 使用 teacher-forcing 方式，将 GT answer 作为标签
+    
+    Args:
+        interface: VQA 模型 interface
+        image: 查询图像
+        question: 查询问题
+        answer: GT 答案（标签）
+        ex1: 第一个示例（包含 image, question, answer）
+        ex2: 第二个示例（包含 image, question, answer）
+    
+    Returns:
+        input_dict: 准备好的输入字典（用于 get_cond_prob）
+        mask_length: mask 长度（用于 get_cond_prob）
+    """
+    # 构造 data_sample_list（示例 + 查询）
+    query_sample = {
+        "image": image,
+        "question": question,
+        "answer": answer,  # 添加标签
+    }
+    data_sample_list = [ex1, ex2, query_sample]
+    
+    # 使用 transfer_prompts 转换为 prompt 格式（is_last_for_generation=False，包含标签）
+    prompts = interface.transfer_prompts(
+        [data_sample_list], 
+        is_last_for_generation=False,
+        query_label=answer  # 传入标签
+    )
+    
+    # 使用 prepare_input 转换为 tensor 格式
+    input_dict = interface.prepare_input(
+        prompts, is_last_for_generation=False
+    )
+    
+    # 处理 BatchFeature 对象，转换为 dict
+    if hasattr(input_dict, 'data'):
+        input_dict = dict(input_dict.data)
+    elif not isinstance(input_dict, dict):
+        input_dict = dict(input_dict)
+    
+    # 将数据移动到设备
+    data = {k: v.to(interface.device) if isinstance(v, torch.Tensor) else v 
+           for k, v in input_dict.items()}
+    
+    # 处理 Qwen2.5-VL 的特殊情况（image_grid_thw）
+    if 'image_grid_thw' in data:
+        if data['image_grid_thw'].dim() == 3 and data['image_grid_thw'].shape[0] == 1:
+            data['image_grid_thw'] = data['image_grid_thw'].squeeze(0)
+            if 'image_nums' in data:
+                if isinstance(data['image_nums'], torch.Tensor) and data['image_nums'].numel() > 1:
+                    data['image_nums'] = data['image_nums'][0:1]
+                elif isinstance(data['image_nums'], list) and len(data['image_nums']) > 0:
+                    data['image_nums'] = torch.tensor([data['image_nums'][0]], dtype=torch.long)
+        elif data['image_grid_thw'].dim() == 2:
+            if 'image_nums' not in data:
+                num_images = data['image_grid_thw'].shape[0]
+                data['image_nums'] = torch.tensor([num_images], dtype=torch.long)
+    
+    # 计算 mask_length（prompt 长度，不包括答案部分）
+    # 参考 utils.py 中 get_info_score 的计算方式：
+    # mask_length 是 prompt 的长度（不包括答案部分）
+    # 对于带标签的情况，需要计算 prompt 的长度（不包括答案）
+    
+    # 获取 prompt 的长度（不包括答案）
+    # 先构建不带答案的 prompt，计算其长度
+    query_sample_no_label = {
+        "image": image,
+        "question": question,
+    }
+    data_sample_list_no_label = [ex1, ex2, query_sample_no_label]
+    
+    # 使用 concat_prompt 构建完整的 prompt 字符串
+    mask_context = interface.concat_prompt(
+        data_sample_list_no_label,
+        add_eos_token=False,
+        is_last_for_generation=True
+    )
+    
+    # 计算 mask_length（prompt 长度，不包括答案）
+    mask_length = interface.get_input_token_num(mask_context)
+    
+    return data, mask_length
 
 
 def build_vqa_prompt_and_generate(
@@ -288,6 +395,89 @@ def build_vqa_prompt_and_generate(
     return answer
 
 
+def compute_expected_vqa_acc_prob(
+    interface,
+    image,
+    question: str,
+    ground_truth_answers: List[str],
+    ex1: Dict,
+    ex2: Dict
+) -> float:
+    """
+    计算期望 VQA 准确率概率（vqa_gt_prob）
+    
+    按照 2025-12-13需求.md P1需求4 的要求：
+    - 计算给定 prompt（含 ICD）下，模型对任一 GT 答案字符串的概率质量
+    - 使用 teacher-forcing / cond_prob 方式
+    - 按 VQA 计分方式加权求和
+    
+    Args:
+        interface: VQA 模型 interface
+        image: 查询图像
+        question: 查询问题
+        ground_truth_answers: GT 答案列表（可能包含重复）
+        ex1: 第一个示例（包含 image, question, answer）
+        ex2: 第二个示例（包含 image, question, answer）
+    
+    Returns:
+        vqa_gt_prob: float [0, 1]，期望 VQA 准确率概率
+    """
+    # 1) 统计 GT answers 频次（已做 normalization）
+    # 处理 ground_truth_answers：如果是字典列表，提取 answer 字段
+    if ground_truth_answers and isinstance(ground_truth_answers[0], dict):
+        gt_answers_str = [ans.get("answer", "") if isinstance(ans, dict) else str(ans) 
+                         for ans in ground_truth_answers]
+    elif ground_truth_answers and isinstance(ground_truth_answers[0], str):
+        gt_answers_str = ground_truth_answers
+    else:
+        gt_answers_str = [str(ans) for ans in ground_truth_answers] if ground_truth_answers else []
+    
+    # 归一化答案（使用 vqa_postprocess）
+    gt_answers_normalized = [vqa_postprocess(ans, model_name="qwen2.5_vl_3B") for ans in gt_answers_str]
+    
+    # 统计去重后的答案及其频次
+    from collections import Counter
+    uniq_counter = Counter(gt_answers_normalized)
+    
+    # 2) 对每个 uniq answer 做 teacher forcing cond_prob
+    probs = {}
+    for ans, cnt in uniq_counter.items():
+        try:
+            # 构建带标签的输入
+            x_input, mask_len = build_vqa_prompt_with_label(
+                interface=interface,
+                image=image,
+                question=question,
+                answer=ans,
+                ex1=ex1,
+                ex2=ex2
+            )
+            
+            # 计算 cond_prob（返回概率，不是 logprob）
+            # get_cond_prob 返回 exp(-ce_loss)，已经是概率
+            p = interface.get_cond_prob(x_input, mask_length=[mask_len])
+            
+            # 处理返回值：可能是标量或 tensor
+            if isinstance(p, torch.Tensor):
+                p = p.item() if p.numel() == 1 else p.mean().item()
+            
+            probs[ans] = float(p)
+        except Exception as e:
+            # 如果计算失败，设为 0
+            print(f"警告：计算 cond_prob 失败 (answer={ans}): {e}")
+            probs[ans] = 0.0
+    
+    # 3) 按 VQA 计分权重加权求和
+    # VQA 计分方式：w(a) = min(count(a)/3.0, 1.0)
+    score = 0.0
+    for ans, cnt in uniq_counter.items():
+        w = min(cnt / 3.0, 1.0)
+        p = probs.get(ans, 0.0)
+        score += p * w
+    
+    return float(score)
+
+
 def compute_vqa_accuracy(
     pred_answer: str,
     ground_truth_answers,
@@ -332,8 +522,11 @@ def compute_vqa_accuracy(
         try:
             # 如果提供了缓存的 VQA 对象，使用缓存（避免重复加载）
             if vqa_cache is not None:
-                # 创建临时结果文件
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                # 创建临时结果文件（使用指定的临时目录，避免磁盘空间不足）
+                temp_kwargs = {'mode': 'w', 'suffix': '.json', 'delete': False}
+                if TEMP_DIR:
+                    temp_kwargs['dir'] = TEMP_DIR
+                with tempfile.NamedTemporaryFile(**temp_kwargs) as f:
                     temp_result_file = f.name
                     json.dump([{
                         "answer": pred_answer,
@@ -371,7 +564,11 @@ def compute_vqa_accuracy(
                         os.remove(temp_result_file)
             else:
                 # 没有缓存，使用标准评估函数（会重新加载文件）
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                # 创建临时结果文件（使用指定的临时目录，避免磁盘空间不足）
+                temp_kwargs = {'mode': 'w', 'suffix': '.json', 'delete': False}
+                if TEMP_DIR:
+                    temp_kwargs['dir'] = TEMP_DIR
+                with tempfile.NamedTemporaryFile(**temp_kwargs) as f:
                     temp_result_file = f.name
                     json.dump([{
                         "answer": pred_answer,
@@ -432,6 +629,7 @@ def generate_rl_data(
     temps: tuple = (1.0, 1.3),
     num_samples_per_temp: int = 2,
     num_random: int = 1,
+    num_retrieval: int = 5,  # 新增：retrieval方法的数量
     device: torch.device = None,
     generation_kwargs: Optional[Dict] = None,
     val_ques_path: Optional[str] = None,
@@ -475,6 +673,19 @@ def generate_rl_data(
     file_metric_count = 0
     fallback_count = 0
     
+    # 优化1: 预加载embeddings到device（避免每个query重复移动）
+    print("优化：预加载embeddings到device...")
+    if query_embeddings.device != device:
+        query_embeddings = query_embeddings.to(device)
+    if candidate_embeddings.device != device:
+        candidate_embeddings = candidate_embeddings.to(device)
+    print("✓ Embeddings已预加载到device")
+    
+    # 优化2: 预构建candidate_pool（避免每个query重复构建）
+    print("优化：预构建candidate_pool...")
+    candidate_pool = [dataset[idx] for idx in candidate_indices]
+    print(f"✓ Candidate pool已预构建（{len(candidate_pool)}个候选）")
+    
     # 优化：预先加载 VQA 对象（只加载一次，避免重复加载）
     vqa_train_cache = None
     vqa_val_cache = None
@@ -500,17 +711,23 @@ def generate_rl_data(
     print(f"  - 温度: {temps}")
     print(f"  - 每个温度采样数: {num_samples_per_temp}")
     print(f"  - 随机组合数: {num_random}")
+    print(f"  - Retrieval数量: {num_retrieval}")
     
     for query_id_str, query_data in tqdm(beam_data.items(), desc="生成 RL 数据"):
         query_id = int(query_id_str)
         
-        # 获取 query embedding
-        query_emb = query_embeddings[query_id].to(device)  # [d]
-        
-        # 获取 candidate embeddings
-        cand_emb = candidate_embeddings.to(device)  # [K, d]
+        # 优化1: embeddings已在device上，直接使用（不需要.to(device)）
+        query_emb = query_embeddings[query_id]  # [d]，已在device上
+        cand_emb = candidate_embeddings  # [K, d]，已在device上
         
         # 生成 pointer 候选（beam + 温度采样 + 随机组合）
+        # 关键修复：需要排除query_id本身，因为ICD不应该包含query
+        # 但candidate_embeddings包含了所有样本（包括query），所以需要在生成时排除
+        # 注意：这里query_id是数据集索引，需要映射到candidate_indices中的位置
+        query_id_in_cand_pos = None
+        if query_id in candidate_indices:
+            query_id_in_cand_pos = candidate_indices.index(query_id)
+        
         pointer_candidates = generate_pointer_candidates_for_query(
             model=sft_model,
             query_emb=query_emb,
@@ -519,7 +736,9 @@ def generate_rl_data(
             temps=temps,
             num_samples_per_temp=num_samples_per_temp,
             num_random=num_random,
-            beam_search_fn=None  # TODO: 如果已有 beam search 函数，可以传入
+            num_retrieval=num_retrieval,  # 使用retrieval方法选择ICD组合
+            beam_search_fn=None,  # TODO: 如果已有 beam search 函数，可以传入
+            exclude_indices=[query_id_in_cand_pos] if query_id_in_cand_pos is not None else None  # 排除query_id本身
         )
         
         # 获取 query 的原始数据（图像、问题、答案等）
@@ -528,10 +747,8 @@ def generate_rl_data(
         question = query_item.get("question")
         gt_answers = query_item.get("answers", [])
         
-        # 构建 candidate_pool（从 dataset 中获取）
-        candidate_pool = []
-        for idx in candidate_indices:
-            candidate_pool.append(dataset[idx])
+        # 优化2: candidate_pool已预构建，直接使用
+        # candidate_pool已在循环外预构建
         
         # 对每个 pointer 候选计算 correctness
         pointer_candidates_with_correctness = []
@@ -609,6 +826,23 @@ def generate_rl_data(
                 else:
                     fallback_count += 1
                 
+                # P1: 计算 vqa_gt_prob（期望 VQA 准确率概率）
+                try:
+                    vqa_gt_prob = compute_expected_vqa_acc_prob(
+                        interface=vqa_model,
+                        image=image,
+                        question=question,
+                        ground_truth_answers=gt_answers,
+                        ex1=ex1,
+                        ex2=ex2
+                    )
+                    c["vqa_gt_prob"] = vqa_gt_prob
+                except Exception as e:
+                    print(f"警告：计算 vqa_gt_prob 失败 (query_id={query_id}, pointer={pointer}): {e}")
+                    import traceback
+                    traceback.print_exc()
+                    c["vqa_gt_prob"] = 0.0
+                
                 # 添加 correctness 信息
                 c["vqa_pred_answer"] = pred_answer
                 c["vqa_correct"] = correct
@@ -619,11 +853,14 @@ def generate_rl_data(
                 print(f"警告：计算 correctness 失败 (query_id={query_id}, pointer={pointer}): {e}")
                 import traceback
                 traceback.print_exc()
-                # 如果失败，设置默认值
+                # P0: 错误不要默默变成负样本，添加 eval_failed 标记
+                # 训练时应该跳过这些候选
                 c["vqa_pred_answer"] = ""
                 c["vqa_correct"] = 0
                 c["vqa_acc_score"] = 0.0
-                c["vqa_eval_mode"] = "fallback"  # 3.3.1: 异常情况标记为 fallback
+                c["vqa_gt_prob"] = 0.0  # P1: 也设为 0
+                c["vqa_eval_mode"] = "error"  # 标记为错误，区别于 fallback
+                c["eval_failed"] = True  # P0: 训练时跳过这些候选
             
             pointer_candidates_with_correctness.append(c)
         
@@ -660,6 +897,7 @@ def main():
     parser.add_argument("--temps", type=float, nargs="+", default=[1.0, 1.3], help="温度列表")
     parser.add_argument("--num_samples_per_temp", type=int, default=2, help="每个温度的采样数量")
     parser.add_argument("--num_random", type=int, default=1, help="随机组合数量")
+    parser.add_argument("--num_retrieval", type=int, default=5, help="Retrieval方法的数量（基于embedding相似度）")
     parser.add_argument("--device", type=str, default="cuda:0", help="设备")
     parser.add_argument("--val_ques_path", type=str, help="验证集问题文件路径（可选，用于准确率计算）")
     parser.add_argument("--val_ann_path", type=str, help="验证集标注文件路径（可选，用于准确率计算）")
@@ -841,6 +1079,9 @@ def main():
                     "load_from_local": False,
                     "precision": "bf16",
                     "icd_join_char": " ",
+                    # 重要：添加system_prompt，确保传递给Qwen2.5-VL模型
+                    # system_prompt要求模型使用简短答案格式（1-3个token）
+                    "system_prompt": "In the upcoming task, you will see four sets of dialogues, each containing two roles: user and assistant. The user is the questioner, who provides an image and asks a question based on it; the assistant is the responder, who answers according to the image and question provided by the user. Afterward, you will receive an image and a question from the user. Please act as the assistant and answer based on the four previous dialogue sets and your own knowledge. Strictly follow the answering format: if the examples use only one or two keywords, your reply must also use only one or two keywords; if the examples contain no more than three tokens, your reply must not exceed three tokens either.",
                 },
                 "task": {
                     "task_name": task_name,
@@ -905,9 +1146,11 @@ def main():
     # 加载 embeddings
     if args.query_emb and args.cand_emb:
         print(f"加载 query embeddings: {args.query_emb}")
+        # 优化：加载时直接放到device上，避免后续重复移动
         query_embeddings = torch.load(args.query_emb, map_location=device)
         
         print(f"加载 candidate embeddings: {args.cand_emb}")
+        # 优化：加载时直接放到device上，避免后续重复移动
         candidate_embeddings = torch.load(args.cand_emb, map_location=device)
         
         # 假设 candidate_indices 是连续的索引
@@ -919,6 +1162,19 @@ def main():
     
     # 生成 RL 数据
     print("开始生成 RL 数据...")
+    # 【重要】使用与v0/v1/v2完全相同的生成参数，确保公平比较
+    # 参考 configs/task/vqa.yaml 中的 gen_args:
+    #   max_new_tokens: 5
+    #   num_beams: 3
+    #   length_penalty: 0.0
+    # 这些参数必须与inference.sh中使用的参数完全一致
+    default_generation_kwargs = {
+        "max_new_tokens": 5,  # 与v0/v1/v2一致（configs/task/vqa.yaml）
+        "num_beams": 3,       # 与v0/v1/v2一致（使用beam search）
+        "length_penalty": 0.0, # 与v0/v1/v2一致
+        "min_new_tokens": 0,   # 与v0/v1/v2一致
+        "do_sample": False,    # deterministic generation
+    }
     rl_data = generate_rl_data(
         sft_model=sft_model,
         vqa_model=vqa_model,
@@ -931,8 +1187,9 @@ def main():
         temps=tuple(args.temps),
         num_samples_per_temp=args.num_samples_per_temp,
         num_random=args.num_random,
+        num_retrieval=args.num_retrieval,
         device=device,
-        generation_kwargs={},
+        generation_kwargs=default_generation_kwargs,
         val_ques_path=args.val_ques_path,
         val_ann_path=args.val_ann_path,
         train_ques_path=args.train_ques_path,

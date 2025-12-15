@@ -447,8 +447,194 @@ def merge_rl_data(
     print(f"  - 输出文件: {output_path}")
 
 
+def balance_candidates_for_query(
+    candidates: List[Dict],
+    top_p: int = 8,
+    top_n: int = 4,
+    min_pos: int = 1,
+) -> Tuple[List[Dict], Dict]:
+    """
+    对单个 query 的候选进行平衡
+    
+    策略：
+    - 正样本：按 vqa_acc_score 排序，取 top-P 个
+    - 负样本：取 hard negatives（vqa_correct=0 但 vqa_acc_score 最高的 top-N 个）
+    
+    Args:
+        candidates: 候选列表
+        top_p: 保留的正样本数量上限
+        top_n: 保留的 hard negatives 数量上限
+        min_pos: 最少需要的正样本数（不满足则返回空）
+        
+    Returns:
+        (balanced_candidates, stats)
+    """
+    # 分离正负样本
+    positives = [c for c in candidates if c.get("vqa_correct", 0) == 1]
+    negatives = [c for c in candidates if c.get("vqa_correct", 0) == 0]
+    
+    # 检查正样本数量
+    if len(positives) < min_pos:
+        return [], {
+            "original_total": len(candidates),
+            "original_pos": len(positives),
+            "original_neg": len(negatives),
+            "kept_pos": 0,
+            "kept_neg": 0,
+            "skipped": True,
+            "skip_reason": f"正样本不足 ({len(positives)} < {min_pos})"
+        }
+    
+    # 正样本：按 vqa_acc_score 排序，取 top-P
+    positives_sorted = sorted(
+        positives, 
+        key=lambda x: x.get("vqa_acc_score", 0), 
+        reverse=True
+    )
+    kept_positives = positives_sorted[:top_p]
+    
+    # 负样本：取 hard negatives（vqa_acc_score 最高的）
+    negatives_sorted = sorted(
+        negatives,
+        key=lambda x: x.get("vqa_acc_score", 0),
+        reverse=True
+    )
+    kept_negatives = negatives_sorted[:top_n]
+    
+    # 合并
+    balanced = kept_positives + kept_negatives
+    
+    stats = {
+        "original_total": len(candidates),
+        "original_pos": len(positives),
+        "original_neg": len(negatives),
+        "kept_pos": len(kept_positives),
+        "kept_neg": len(kept_negatives),
+        "skipped": False,
+    }
+    
+    return balanced, stats
+
+
+def balance_rl_data(
+    input_path: str,
+    output_path: str,
+    top_p: int = 8,
+    top_n: int = 4,
+    min_pos: int = 1,
+    require_positive: bool = True,
+):
+    """
+    对 RL 数据进行候选平衡
+    
+    根据 2025-12-23需求.md 的 C2 要求：
+    - 每个 query 保留 top-P 个正样本（按 vqa_acc_score 排序）
+    - 每个 query 保留 top-N 个 hard negatives（vqa_correct=0 但 vqa_acc_score 最高）
+    - 过滤掉没有正样本的 query（如果 require_positive=True）
+    
+    Args:
+        input_path: 输入 RL 数据路径
+        output_path: 输出路径
+        top_p: 保留的正样本数量上限（默认 8）
+        top_n: 保留的 hard negatives 数量上限（默认 4）
+        min_pos: 最少需要的正样本数（默认 1）
+        require_positive: 是否要求每个 query 至少有 min_pos 个正样本
+    """
+    print(f"加载 RL 数据: {input_path}")
+    with open(input_path, "r") as f:
+        rl_data = json.load(f)
+    
+    print(f"\n平衡参数:")
+    print(f"  - top_p (正样本上限): {top_p}")
+    print(f"  - top_n (hard negatives 上限): {top_n}")
+    print(f"  - min_pos (最少正样本): {min_pos}")
+    print(f"  - require_positive: {require_positive}")
+    
+    balanced_data = {}
+    
+    # 统计
+    total_queries = len(rl_data)
+    kept_queries = 0
+    skipped_queries = 0
+    total_original_candidates = 0
+    total_kept_candidates = 0
+    total_original_pos = 0
+    total_kept_pos = 0
+    total_original_neg = 0
+    total_kept_neg = 0
+    
+    skip_reasons = {}
+    
+    for qid, qinfo in tqdm(rl_data.items(), desc="Balancing candidates"):
+        candidates = qinfo.get("pointer_candidates", [])
+        
+        if not candidates:
+            skipped_queries += 1
+            skip_reasons["无候选"] = skip_reasons.get("无候选", 0) + 1
+            continue
+        
+        balanced, stats = balance_candidates_for_query(
+            candidates=candidates,
+            top_p=top_p,
+            top_n=top_n,
+            min_pos=min_pos if require_positive else 0,
+        )
+        
+        total_original_candidates += stats["original_total"]
+        total_original_pos += stats["original_pos"]
+        total_original_neg += stats["original_neg"]
+        
+        if stats["skipped"]:
+            skipped_queries += 1
+            reason = stats.get("skip_reason", "未知")
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            continue
+        
+        if balanced:
+            balanced_data[qid] = {"pointer_candidates": balanced}
+            kept_queries += 1
+            total_kept_candidates += len(balanced)
+            total_kept_pos += stats["kept_pos"]
+            total_kept_neg += stats["kept_neg"]
+    
+    # 保存结果
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(balanced_data, f, indent=2, ensure_ascii=False)
+    
+    # 输出统计
+    print(f"\n" + "=" * 60)
+    print(f"候选平衡结果")
+    print(f"=" * 60)
+    print(f"\n【Query 统计】")
+    print(f"  - 原始 Query 数: {total_queries}")
+    print(f"  - 保留 Query 数: {kept_queries} ({kept_queries/max(total_queries,1)*100:.1f}%)")
+    print(f"  - 跳过 Query 数: {skipped_queries}")
+    if skip_reasons:
+        print(f"  - 跳过原因:")
+        for reason, count in skip_reasons.items():
+            print(f"      {reason}: {count}")
+    
+    print(f"\n【候选统计】")
+    print(f"  - 原始候选总数: {total_original_candidates}")
+    print(f"  - 保留候选总数: {total_kept_candidates} ({total_kept_candidates/max(total_original_candidates,1)*100:.1f}%)")
+    print(f"  - 原始正样本数: {total_original_pos} ({total_original_pos/max(total_original_candidates,1)*100:.2f}%)")
+    print(f"  - 保留正样本数: {total_kept_pos} ({total_kept_pos/max(total_kept_candidates,1)*100:.2f}%)")
+    print(f"  - 原始负样本数: {total_original_neg}")
+    print(f"  - 保留负样本数 (hard negatives): {total_kept_neg}")
+    
+    if kept_queries > 0:
+        print(f"\n【每 Query 平均】")
+        print(f"  - 平均候选数: {total_kept_candidates/kept_queries:.1f}")
+        print(f"  - 平均正样本数: {total_kept_pos/kept_queries:.1f}")
+        print(f"  - 平均负样本数: {total_kept_neg/kept_queries:.1f}")
+    
+    print(f"\n输出文件: {output_path}")
+    print(f"=" * 60)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="正样本挖掘工具")
+    parser = argparse.ArgumentParser(description="正样本挖掘与数据平衡工具")
     subparsers = parser.add_subparsers(dest="command", help="子命令")
     
     # 子命令: mine_old
@@ -465,6 +651,19 @@ def main():
     merge_parser.add_argument("--mined", type=str, nargs="+", required=True, help="挖掘的正样本数据路径")
     merge_parser.add_argument("--output", type=str, required=True, help="输出路径")
     
+    # 子命令: balance（新增）
+    balance_parser = subparsers.add_parser("balance", help="对 RL 数据进行候选平衡")
+    balance_parser.add_argument("--input", type=str, required=True, help="输入 RL 数据路径")
+    balance_parser.add_argument("--output", type=str, required=True, help="输出路径")
+    balance_parser.add_argument("--top_p", type=int, default=8, 
+                                help="保留的正样本数量上限（默认 8）")
+    balance_parser.add_argument("--top_n", type=int, default=4, 
+                                help="保留的 hard negatives 数量上限（默认 4）")
+    balance_parser.add_argument("--min_pos", type=int, default=1, 
+                                help="每个 query 最少需要的正样本数（默认 1）")
+    balance_parser.add_argument("--no_require_positive", action="store_true",
+                                help="不要求每个 query 必须有正样本")
+    
     args = parser.parse_args()
     
     if args.command == "mine_old":
@@ -480,6 +679,15 @@ def main():
             base_rl_path=args.base_rl,
             mined_paths=args.mined,
             output_path=args.output,
+        )
+    elif args.command == "balance":
+        balance_rl_data(
+            input_path=args.input,
+            output_path=args.output,
+            top_p=args.top_p,
+            top_n=args.top_n,
+            min_pos=args.min_pos,
+            require_positive=not args.no_require_positive,
         )
     else:
         parser.print_help()

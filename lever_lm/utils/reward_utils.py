@@ -220,6 +220,7 @@ def compute_reward_for_candidate(
     logprob_score: Optional[float] = None,
     vqa_correct: Optional[int] = None,
     vqa_acc_score: Optional[float] = None,
+    vqa_gt_prob: Optional[float] = None,  # P1: 新增 vqa_gt_prob 支持
     # 新增：reward 模式参数
     reward_mode: str = "hard_plus_soft",
     hard_weight: float = 1.0,
@@ -245,6 +246,8 @@ def compute_reward_for_candidate(
     - "separated": 阈值分离，正样本 [2,3]，负样本 [0,1]（推荐，正负样本有明确 gap）
     - "hard_only": reward = hard（只看是否答对）
     - "soft_only": reward = soft（只看准确率分数）
+    - "hard01_plus_gtprob": reward = hard_weight*hard + soft_weight*gt_prob（P1: 使用 vqa_gt_prob 作为 soft）
+    - "hard01_plus_gtprob_separated": 阈值分离，使用 gt_prob（P1: 推荐，正样本 [2*hard_weight, 2*hard_weight+soft_weight]，负样本 [0, soft_weight]）
     - "hybrid": 混合 InfoScore 和 correctness（需要 beam_score）
     - "legacy": 使用旧的 alpha/beta 组合方式（兼容旧代码）
     
@@ -253,6 +256,7 @@ def compute_reward_for_candidate(
         logprob_score: log 概率分数（可选，legacy 模式使用）
         vqa_correct: correctness (0/1)（可选）
         vqa_acc_score: VQA 准确率分数 [0,1]（可选）
+        vqa_gt_prob: GT 概率（P1: 连续 soft reward，与 VQA metric 对齐）
         reward_mode: reward 模式（默认 "hard_plus_soft"）
         hard_weight: hard correctness 权重（默认 1.0）
         soft_weight: soft correctness 权重（默认 1.0）
@@ -304,26 +308,33 @@ def compute_reward_for_candidate(
         else:
             reward = soft_weight * soft  # 负样本 [0.0, 1.0]
     
-    elif reward_mode == "hybrid":
-        # 混合 InfoScore 和 correctness
-        # 适用于同时有 beam_score 和 correctness 的场景
+    elif reward_mode == "hard01_plus_gtprob":
+        # P1: 使用 vqa_gt_prob 作为 soft reward
+        # 按照 2025-12-13需求.md P1需求5 的要求：
+        # reward = hard_weight * hard + soft_weight * soft
+        # 其中 hard = vqa_correct (0/1), soft = vqa_gt_prob [0,1]
         hard = float(vqa_correct) if vqa_correct is not None else 0.0
-        soft = float(vqa_acc_score) if vqa_acc_score is not None else 0.0
-        info_score = float(beam_score) if beam_score is not None else 0.0
+        soft = float(vqa_gt_prob) if vqa_gt_prob is not None else 0.0
         
-        # 归一化 info_score（假设范围 [-0.1, 0.1]，映射到 [0, 1]）
-        info_normalized = (info_score + 0.1) / 0.2
-        info_normalized = max(0.0, min(1.0, info_normalized))
+        # 组合：reward = hard_weight * hard + soft_weight * soft
+        # 默认：reward = 2.0 * hard + 1.0 * soft
+        # 正样本：[2.0, 3.0]，负样本：[0.0, 1.0]
+        reward = hard_weight * hard + soft_weight * soft
+    
+    elif reward_mode == "hard01_plus_gtprob_separated":
+        # P1: 使用 vqa_gt_prob 作为 soft reward，阈值分离
+        # 按照 2025-12-13需求.md P1需求5 的要求：
+        # 正样本：reward = 2.0 * hard_weight + soft_weight * gt_prob，范围 [2*hard_weight, 2*hard_weight + soft_weight]
+        # 负样本：reward = soft_weight * gt_prob，范围 [0, soft_weight]
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        soft = float(vqa_gt_prob) if vqa_gt_prob is not None else 0.0
         
-        # correctness 部分（使用分离设计）
         if hard == 1.0:
-            correct_reward = 2.0 + soft  # 正样本 [2.0, 3.0]
+            # 正样本：[2*hard_weight, 2*hard_weight + soft_weight]
+            reward = 2.0 * hard_weight + soft_weight * soft
         else:
-            correct_reward = soft  # 负样本 [0.0, 1.0]
-        
-        # 混合：hard_weight 作为 info_score 的权重
-        alpha_mix = min(1.0, max(0.0, hard_weight))
-        reward = alpha_mix * info_normalized + (1.0 - alpha_mix) * correct_reward
+            # 负样本：[0, soft_weight]
+            reward = soft_weight * soft
     
     elif reward_mode == "legacy":
         # 兼容旧的 alpha/beta 组合方式

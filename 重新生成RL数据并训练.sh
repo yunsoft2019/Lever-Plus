@@ -68,3 +68,7 @@ echo "  tail -f logs/train_img.log"
 echo "  tail -f logs/train_mix.log"
 echo ""
 
+
+
+
+

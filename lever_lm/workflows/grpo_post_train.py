@@ -523,8 +523,8 @@ def main():
     parser.add_argument("--use_top1_only", action="store_true", help="只使用Top-1 beam训练（回归V2监督学习方式）")
     # 新的 Reward 参数（推荐使用）
     parser.add_argument("--reward_mode", type=str, default="hard_plus_soft", 
-                        choices=["hard_plus_soft", "hard_plus_soft_v2", "separated", "hard_only", "soft_only", "hybrid", "legacy"],
-                        help="Reward模式：hard_plus_soft（默认，reward=vqa_correct+vqa_acc_score，范围[0,2]）、hard_plus_soft_v2、separated（推荐，正负样本有明确gap）、hard_only、soft_only、hybrid、legacy")
+                        choices=["hard_plus_soft", "hard_plus_soft_v2", "separated", "hard_only", "soft_only", "hybrid", "legacy", "hard01_plus_gtprob", "hard01_plus_gtprob_separated"],
+                        help="Reward模式：hard_plus_soft（默认，reward=vqa_correct+vqa_acc_score，范围[0,2]）、hard_plus_soft_v2、separated（推荐，正负样本有明确gap）、hard_only、soft_only、hybrid、legacy、hard01_plus_gtprob（使用vqa_gt_prob作为soft reward）、hard01_plus_gtprob_separated（阈值分离版本）")
     parser.add_argument("--hard_weight", type=float, default=1.0, help="Hard correctness权重（默认1.0）")
     parser.add_argument("--soft_weight", type=float, default=1.0, help="Soft correctness权重（默认1.0）")
     # 兼容旧的 Reward 参数（legacy 模式使用）

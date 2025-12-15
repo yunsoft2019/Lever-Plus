@@ -414,8 +414,16 @@ class RLBeamDatasetWithEmbedding(Dataset):
             beam_logprobs = []
             
             for c in pointer_candidates:
+                # P0: 跳过评估失败的候选（eval_failed=True）
+                if c.get("eval_failed", False):
+                    continue
+                
                 # 3.3.2: 如果要求跳过 fallback 样本
                 if self.skip_fallback_reward and c.get("vqa_eval_mode") == "fallback":
+                    continue
+                
+                # 跳过 error 类型的样本（评估过程中出错）
+                if c.get("vqa_eval_mode") == "error":
                     continue
                 
                 pointer = c["pointer"]
@@ -435,12 +443,14 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 
                 # 计算组合reward（使用新的 reward_mode）
                 # 根据文档要求：不要将 beam_score/logprob_score 混入 reward（除非 legacy 模式）
+                # P1: 支持 vqa_gt_prob 作为 soft reward
                 if self.reward_mode == "legacy":
                     reward = compute_reward_for_candidate(
                         beam_score=c.get("beam_score"),
                         logprob_score=c.get("logprob_score"),
                         vqa_correct=c.get("vqa_correct"),
                         vqa_acc_score=c.get("vqa_acc_score"),
+                        vqa_gt_prob=c.get("vqa_gt_prob"),  # P1: 传入 vqa_gt_prob
                         reward_mode=self.reward_mode,
                         hard_weight=self.hard_weight,
                         soft_weight=self.soft_weight,
@@ -450,10 +460,11 @@ class RLBeamDatasetWithEmbedding(Dataset):
                         use_logprob=self.use_logprob
                     )
                 else:
-                    # 非 legacy 模式：只传入 correctness 相关参数
+                    # 非 legacy 模式：传入 correctness 相关参数，包括 vqa_gt_prob
                     reward = compute_reward_for_candidate(
                         vqa_correct=c.get("vqa_correct"),
                         vqa_acc_score=c.get("vqa_acc_score"),
+                        vqa_gt_prob=c.get("vqa_gt_prob"),  # P1: 传入 vqa_gt_prob
                         reward_mode=self.reward_mode,
                         hard_weight=self.hard_weight,
                         soft_weight=self.soft_weight,

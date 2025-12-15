@@ -230,3 +230,7 @@ Checkpoint 保存在: ./results/okvqa/model_cpk/v3_RandSampler_Qwen2_5-VL-3B-Ins
 
 **更新时间：** 2025-12-10
 
+
+
+
+
