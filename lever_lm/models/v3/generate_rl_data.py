@@ -133,7 +133,7 @@ def load_vqa_model(model_name: str, device: torch.device, cfg: Optional[DictConf
     Args:
         model_name: 模型名称（如 "qwen2.5_vl_3B" 或 "flamingo_3B"）
         device: 设备
-        cfg: 配置对象（可选，如果提供则使用，否则创建默认配置）
+        cfg: 配置对象（可选，如果提供则使用，否则从config文件加载）
     
     Returns:
         vqa_model: VQA 模型 interface
@@ -154,25 +154,42 @@ def load_vqa_model(model_name: str, device: torch.device, cfg: Optional[DictConf
         hf_model_name = None
     
     if cfg is None:
-        # 创建默认配置
-        # 重要：需要包含system_prompt，确保传递给Qwen2.5-VL模型
-        # system_prompt要求模型使用简短答案格式（1-3个token）
+        # 【重要】从config文件加载配置，确保与v0/v1/v2完全一致
+        # 参考 configs/infer_model/qwen2.5_vl_3B.yaml 和 configs/task/vqa.yaml
+        infer_model_config_path = "configs/infer_model/qwen2.5_vl_3B.yaml"
+        task_config_path = "configs/task/vqa.yaml"
+        
+        # 加载infer_model配置
+        if os.path.exists(infer_model_config_path):
+            infer_model_cfg = OmegaConf.load(infer_model_config_path)
+        else:
+            raise FileNotFoundError(f"配置文件不存在: {infer_model_config_path}")
+        
+        # 加载task配置
+        if os.path.exists(task_config_path):
+            task_cfg = OmegaConf.load(task_config_path)
+        else:
+            raise FileNotFoundError(f"配置文件不存在: {task_config_path}")
+        
+        # 合并配置，确保与v0/v1/v2完全一致
         cfg = OmegaConf.create({
             "infer_model": {
                 "name": infer_model_name,  # 使用映射后的名称
                 "model_name": hf_model_name,
                 "load_from_local": False,
                 "precision": "bf16",
-                "icd_join_char": " ",
-                "system_prompt": "In the upcoming task, you will see four sets of dialogues, each containing two roles: user and assistant. The user is the questioner, who provides an image and asks a question based on it; the assistant is the responder, who answers according to the image and question provided by the user. Afterward, you will receive an image and a question from the user. Please act as the assistant and answer based on the four previous dialogue sets and your own knowledge. Strictly follow the answering format: if the examples use only one or two keywords, your reply must also use only one or two keywords; if the examples contain no more than three tokens, your reply must not exceed three tokens either.",
+                # 【关键】使用config文件中的值，确保与v0/v1/v2一致
+                "icd_join_char": infer_model_cfg.get("icd_join_char", "<|endofchunk|>"),  # 从config加载
+                "system_prompt": infer_model_cfg.get("system_prompt", ""),  # 从config加载
             },
             "task": {
-                "template": "Question: {question} Short answer: {answer}",  # VQA 任务的字符串模板
-                "column_token_map": {
-                    "question": "<question>",
-                    "answer": "<answer>"
-                },
-                "instruction": "",
+                # 【关键】使用config文件中的vqa_prompt_template，确保与v0/v1/v2一致
+                # configs/infer_model/qwen2.5_vl_3B.yaml: vqa_prompt_template: "Question:<Q> Short answer:<A>"
+                "template": infer_model_cfg.get("vqa_prompt_template", "Question:<Q> Short answer:<A>"),
+                # 【关键】使用config文件中的column_token_map，确保与v0/v1/v2一致
+                # configs/task/vqa.yaml: column_token_map: {question: "<Q>", answer: "<A>"}
+                "column_token_map": OmegaConf.to_container(task_cfg.get("column_token_map", {"question": "<Q>", "answer": "<A>"})),
+                "instruction": infer_model_cfg.get("vqa_instruction", ""),
                 "image_field": "image",
                 "output_column": "answer",
             },
@@ -927,17 +944,17 @@ def main():
                 model_name_lower = cfg.infer_model.name.lower()
                 if "qwen" in model_name_lower and "Qwen2.5-VL" not in cfg.infer_model.name:
                     cfg.infer_model.name = "Qwen2.5-VL"
-            # 确保 task.template 不是 None（如果是 None，设置为字符串模板）
+            # 确保 task.template 不是 None（如果是 None，设置为字符串模板，使用与v0/v1/v2一致的格式）
             if "task" in cfg and cfg.task.get("template") is None:
-                cfg.task.template = "Question: {question} Short answer: {answer}"
-            # 如果 template 是空字典，也设置为字符串模板
+                cfg.task.template = "Question:<Q> Short answer:<A>"  # 与v0/v1/v2一致（不是Question: {question} Short answer: {answer}）
+            # 如果 template 是空字典，也设置为字符串模板（使用与v0/v1/v2一致的格式）
             if "task" in cfg and isinstance(cfg.task.get("template"), dict) and len(cfg.task.template) == 0:
-                cfg.task.template = "Question: {question} Short answer: {answer}"
-                # 确保 column_token_map 存在
+                cfg.task.template = "Question:<Q> Short answer:<A>"  # 与v0/v1/v2一致（不是Question: {question} Short answer: {answer}）
+                # 确保 column_token_map 存在（使用与v0/v1/v2一致的格式）
                 if "column_token_map" not in cfg.task or not cfg.task.column_token_map:
                     cfg.task.column_token_map = {
-                        "question": "<question>",
-                        "answer": "<answer>"
+                        "question": "<Q>",    # 与v0/v1/v2一致（不是<question>）
+                        "answer": "<A>"       # 与v0/v1/v2一致（不是<answer>）
                     }
     else:
         # 映射模型名称到 init_interface 期望的格式
@@ -1078,17 +1095,22 @@ def main():
                     "model_name": hf_model_name,
                     "load_from_local": False,
                     "precision": "bf16",
-                    "icd_join_char": " ",
-                    # 重要：添加system_prompt，确保传递给Qwen2.5-VL模型
-                    # system_prompt要求模型使用简短答案格式（1-3个token）
+                    # 【关键】从config文件加载，确保与v0/v1/v2一致
+                    # configs/infer_model/qwen2.5_vl_3B.yaml: icd_join_char: "<|endofchunk|>"
+                    "icd_join_char": "<|endofchunk|>",  # 与v0/v1/v2一致
+                    # 【关键】从config文件加载system_prompt，确保与v0/v1/v2一致
                     "system_prompt": "In the upcoming task, you will see four sets of dialogues, each containing two roles: user and assistant. The user is the questioner, who provides an image and asks a question based on it; the assistant is the responder, who answers according to the image and question provided by the user. Afterward, you will receive an image and a question from the user. Please act as the assistant and answer based on the four previous dialogue sets and your own knowledge. Strictly follow the answering format: if the examples use only one or two keywords, your reply must also use only one or two keywords; if the examples contain no more than three tokens, your reply must not exceed three tokens either.",
                 },
                 "task": {
                     "task_name": task_name,
-                    "template": "Question: {question} Short answer: {answer}",  # VQA 任务的字符串模板
+                    # 【关键】使用与v0/v1/v2完全相同的template格式
+                    # configs/infer_model/qwen2.5_vl_3B.yaml: vqa_prompt_template: "Question:<Q> Short answer:<A>"
+                    "template": "Question:<Q> Short answer:<A>",  # 与v0/v1/v2一致
+                    # 【关键】使用与v0/v1/v2完全相同的column_token_map
+                    # configs/task/vqa.yaml: column_token_map: {question: "<Q>", answer: "<A>"}
                     "column_token_map": {
-                        "question": "<question>",
-                        "answer": "<answer>"
+                        "question": "<Q>",    # 与v0/v1/v2一致（不是<question>）
+                        "answer": "<A>"       # 与v0/v1/v2一致（不是<answer>）
                     },
                     "instruction": "",
                     "image_field": "image",
@@ -1162,19 +1184,34 @@ def main():
     
     # 生成 RL 数据
     print("开始生成 RL 数据...")
-    # 【重要】使用与v0/v1/v2完全相同的生成参数，确保公平比较
-    # 参考 configs/task/vqa.yaml 中的 gen_args:
-    #   max_new_tokens: 5
-    #   num_beams: 3
-    #   length_penalty: 0.0
-    # 这些参数必须与inference.sh中使用的参数完全一致
-    default_generation_kwargs = {
-        "max_new_tokens": 5,  # 与v0/v1/v2一致（configs/task/vqa.yaml）
-        "num_beams": 3,       # 与v0/v1/v2一致（使用beam search）
-        "length_penalty": 0.0, # 与v0/v1/v2一致
-        "min_new_tokens": 0,   # 与v0/v1/v2一致
-        "do_sample": False,    # deterministic generation
-    }
+    # 【重要】从config文件加载生成参数，确保与推理完全一致
+    # 参考 configs/task/vqa.yaml 中的 gen_args，与 icl_inference.py 中的使用方式一致
+    task_config_path = "configs/task/vqa.yaml"
+    if os.path.exists(task_config_path):
+        task_cfg = OmegaConf.load(task_config_path)
+        # 从config文件加载gen_args，确保与推理完全一致
+        if hasattr(task_cfg, 'gen_args') and task_cfg.gen_args:
+            default_generation_kwargs = OmegaConf.to_container(task_cfg.gen_args)
+            print(f"✓ 从 {task_config_path} 加载生成参数:")
+            for k, v in default_generation_kwargs.items():
+                print(f"  {k}: {v}")
+        else:
+            # Fallback：如果config中没有gen_args，使用默认值（与configs/task/vqa.yaml一致）
+            print(f"⚠️  警告：{task_config_path} 中没有 gen_args，使用默认值")
+            default_generation_kwargs = {
+                "max_new_tokens": 5,
+                "num_beams": 3,
+                "length_penalty": 0.0,
+                "min_new_tokens": 0,
+            }
+    else:
+        raise FileNotFoundError(f"配置文件不存在: {task_config_path}")
+    
+    # 确保do_sample参数正确（beam search时应该为False）
+    if default_generation_kwargs.get("num_beams", 1) > 1:
+        default_generation_kwargs["do_sample"] = False  # beam search时必须是deterministic
+    else:
+        default_generation_kwargs.setdefault("do_sample", False)
     rl_data = generate_rl_data(
         sft_model=sft_model,
         vqa_model=vqa_model,
