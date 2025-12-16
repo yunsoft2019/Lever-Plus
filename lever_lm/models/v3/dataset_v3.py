@@ -338,6 +338,7 @@ class RLBeamDatasetWithEmbedding(Dataset):
         reward_mode: str = "hard_plus_soft",
         hard_weight: float = 1.0,
         soft_weight: float = 1.0,
+        rel_weight: float = 0.1,  # relevance权重（hard_plus_gtprob_plus_rel模式使用）
         # 兼容旧接口的参数（默认不启用）
         reward_alpha: float = 0.0,
         reward_beta: float = 0.0,
@@ -378,6 +379,7 @@ class RLBeamDatasetWithEmbedding(Dataset):
         self.reward_mode = reward_mode
         self.hard_weight = hard_weight
         self.soft_weight = soft_weight
+        self.rel_weight = rel_weight
         self.reward_alpha = reward_alpha
         self.reward_beta = reward_beta
         self.reward_correctness_mode = reward_correctness_mode
@@ -439,24 +441,27 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 if c.get("vqa_eval_mode") == "error":
                     continue
                 
-                # 【修复A】支持新格式：优先使用pointer_pos（position），否则使用pointer（global id，需要映射）
+                # 【修复A】支持新格式：优先使用pointer_pos，否则使用pointer
+                # 注意：pointer_pos 和 pointer 都是 global ID，需要映射到 position
                 if "pointer_pos" in c:
-                    # 新格式：直接使用pointer_pos（已经是position）
+                    # 优先使用pointer_pos（如果存在）
                     pointer = c["pointer_pos"]
-                    mapped_pointer = pointer  # 已经是position，无需映射
-                else:
-                    # 旧格式：使用pointer（global id），需要映射到position
+                elif "pointer" in c:
+                    # 使用pointer（如果pointer_pos不存在）
                     pointer = c["pointer"]
-                    # 映射pointer中的索引为candidate位置
-                    # 严格检查：如果索引不在 candidate_indices 中，立即报错
-                    mapped_pointer = []
-                    for idx in pointer:
-                        if idx not in self.cand_idx_to_pos:
-                            raise KeyError(
-                                f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
-                                f"(query_id={query_id})"
-                            )
-                        mapped_pointer.append(self.cand_idx_to_pos[idx])
+                else:
+                    raise ValueError(f"候选数据中既没有pointer也没有pointer_pos字段 (query_id={query_id})")
+                
+                # 映射pointer中的索引为candidate位置（无论pointer还是pointer_pos都是global ID）
+                # 严格检查：如果索引不在 candidate_indices 中，立即报错
+                mapped_pointer = []
+                for idx in pointer:
+                    if idx not in self.cand_idx_to_pos:
+                        raise KeyError(
+                            f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
+                            f"(query_id={query_id}, candidate_indices范围: {min(self.cand_idx_to_pos.keys()) if self.cand_idx_to_pos else 'N/A'}-{max(self.cand_idx_to_pos.keys()) if self.cand_idx_to_pos else 'N/A'})"
+                        )
+                    mapped_pointer.append(self.cand_idx_to_pos[idx])
                 
                 assert len(mapped_pointer) == shot_num, f"pointer长度不匹配: {len(mapped_pointer)} vs {shot_num}"
                 beam_labels.append(mapped_pointer)
@@ -489,6 +494,7 @@ class RLBeamDatasetWithEmbedding(Dataset):
                         reward_mode=self.reward_mode,
                         hard_weight=self.hard_weight,
                         soft_weight=self.soft_weight,
+                        rel_weight=self.rel_weight,  # relevance权重
                         alpha=self.reward_alpha,
                         beta=self.reward_beta,
                         correctness_mode=self.reward_correctness_mode,
@@ -671,7 +677,8 @@ def split_beam_data(
     Returns:
         (train_data, val_data)
     """
-    query_ids = list(beam_data.keys())
+    # 跳过_meta等非数字key
+    query_ids = [k for k in beam_data.keys() if k != "_meta" and (k.isdigit() or (isinstance(k, str) and k.replace('-', '').replace('_', '').isdigit()))]
     num_train = int(len(query_ids) * train_ratio)
     
     # 按query_id排序后划分，保证可复现
@@ -679,9 +686,14 @@ def split_beam_data(
     train_ids = set(query_ids_sorted[:num_train])
     
     train_data = {k: v for k, v in beam_data.items() if k in train_ids}
-    val_data = {k: v for k, v in beam_data.items() if k not in train_ids}
+    val_data = {k: v for k, v in beam_data.items() if k not in train_ids and k != "_meta"}
     
-    print(f"数据划分: 训练集 {len(train_data)}, 验证集 {len(val_data)}")
+    # 保留_meta字段（如果存在）
+    if "_meta" in beam_data:
+        train_data["_meta"] = beam_data["_meta"]
+        val_data["_meta"] = beam_data["_meta"]
+    
+    print(f"数据划分: 训练集 {len([k for k in train_data.keys() if k != '_meta'])} 个query, 验证集 {len([k for k in val_data.keys() if k != '_meta'])} 个query")
     
     return train_data, val_data
 

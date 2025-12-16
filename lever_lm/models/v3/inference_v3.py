@@ -76,11 +76,13 @@ def load_v3_from_grpo_checkpoint(
     
     logger.info(f"推断模型配置: d_model={d_model}, hidden_dim={hidden_dim}, num_layers={num_layers}")
     
-    # 创建模型
+    # 创建模型（使用与V2一致的配置）
     model = PointerSelectorV3(
         d_model=d_model,
         hidden_dim=hidden_dim,
-        num_layers=num_layers
+        num_layers=num_layers,
+        label_smoothing=0.0,  # 与V2一致，不使用标签平滑
+        dropout=0.5  # 与V2一致，强正则化
     )
     
     # 加载权重

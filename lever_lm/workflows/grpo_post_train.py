@@ -399,7 +399,9 @@ class GRPOTrainer:
             d_model=self.model.d_model,
             K=self.model.K,
             shot_num=self.model.shot_num,
-            num_layers=self.model.num_layers
+            num_layers=self.model.num_layers,
+            label_smoothing=0.0,  # 与V2一致，不使用标签平滑
+            dropout=0.5  # 与V2一致，强正则化
         ).to(self.device)
         sft_model.load_state_dict(self.model.state_dict())
         sft_model.eval()
@@ -523,10 +525,11 @@ def main():
     parser.add_argument("--use_top1_only", action="store_true", help="只使用Top-1 beam训练（回归V2监督学习方式）")
     # 新的 Reward 参数（推荐使用）
     parser.add_argument("--reward_mode", type=str, default="hard_plus_soft", 
-                        choices=["hard_plus_soft", "hard_plus_soft_v2", "separated", "hard_only", "soft_only", "hybrid", "legacy", "hard01_plus_gtprob", "hard01_plus_gtprob_separated"],
-                        help="Reward模式：hard_plus_soft（默认，reward=vqa_correct+vqa_acc_score，范围[0,2]）、hard_plus_soft_v2、separated（推荐，正负样本有明确gap）、hard_only、soft_only、hybrid、legacy、hard01_plus_gtprob（使用vqa_gt_prob作为soft reward）、hard01_plus_gtprob_separated（阈值分离版本）")
+                        choices=["hard_plus_soft", "hard_plus_soft_v2", "separated", "hard_only", "soft_only", "hybrid", "legacy", "hard01_plus_gtprob", "hard01_plus_gtprob_separated", "hard_plus_gtprob_plus_rel"],
+                        help="Reward模式：hard_plus_soft（默认，reward=vqa_correct+vqa_acc_score，范围[0,2]）、hard_plus_soft_v2、separated（推荐，正负样本有明确gap）、hard_only、soft_only、hybrid、legacy、hard01_plus_gtprob（使用vqa_gt_prob作为soft reward）、hard01_plus_gtprob_separated（阈值分离版本）、hard_plus_gtprob_plus_rel（使用hard+gt_prob+relevance，推荐）")
     parser.add_argument("--hard_weight", type=float, default=1.0, help="Hard correctness权重（默认1.0）")
     parser.add_argument("--soft_weight", type=float, default=1.0, help="Soft correctness权重（默认1.0）")
+    parser.add_argument("--rel_weight", type=float, default=0.1, help="Relevance权重（hard_plus_gtprob_plus_rel模式使用，默认0.1，只在错误样本上使用）")
     # 兼容旧的 Reward 参数（legacy 模式使用）
     parser.add_argument("--reward_alpha", type=float, default=0.0, help="Quality权重（legacy模式，默认0.0）")
     parser.add_argument("--reward_beta", type=float, default=0.0, help="Correctness权重（legacy模式，默认0.0）")
@@ -559,14 +562,28 @@ def main():
     beam_data = load_beam_data(args.beam_data)
     
     # 检测数据格式：旧格式（id_list/score_list）还是新格式（pointer_candidates）
-    first_key = list(beam_data.keys())[0]
+    # 跳过_meta等非数字key
+    data_keys = [k for k in beam_data.keys() if k != "_meta" and (k.isdigit() or (isinstance(k, str) and k.replace('-', '').replace('_', '').isdigit()))]
+    if not data_keys:
+        raise ValueError("数据中没有找到有效的query数据（只有_meta或其他非数字key）")
+    
+    first_key = data_keys[0]
     first_data = beam_data[first_key]
     
-    if "pointer_candidates" in first_data:
+    # 支持新格式：data可能是{"query": {...}, "pointer_candidates": [...]}
+    # 或旧格式：{"pointer_candidates": [...]}
+    if "query" in first_data:
+        pointer_candidates = first_data.get("pointer_candidates", [])
+    else:
+        pointer_candidates = first_data.get("pointer_candidates", [])
+    
+    if pointer_candidates:
         # 新格式：RL数据（包含correctness）
         data_format = "rl"
         print("✓ 检测到新格式数据（RL数据，包含correctness）")
-        shot_num = len(first_data["pointer_candidates"][0]["pointer"])
+        # 优先使用pointer（global id），如果没有则使用pointer_pos
+        sample_pointer = pointer_candidates[0].get("pointer") or pointer_candidates[0].get("pointer_pos", [])
+        shot_num = len(sample_pointer)
         # 新格式没有固定的num_beams，每个query的候选数量可能不同
         num_beams = None
     elif "id_list" in first_data and "score_list" in first_data:
@@ -598,13 +615,26 @@ def main():
         if data_format == "rl":
             # 新格式：从pointer_candidates中提取
             for qid, data in beam_data.items():
-                for candidate in data.get("pointer_candidates", []):
-                    pointer = candidate.get("pointer", [])
+                # 跳过_meta等非数字key
+                if qid == "_meta" or not (qid.isdigit() or (isinstance(qid, str) and qid.replace('-', '').replace('_', '').isdigit())):
+                    continue
+                # 支持新格式：data可能是{"query": {...}, "pointer_candidates": [...]}
+                # 或旧格式：{"pointer_candidates": [...]}
+                if "query" in data:
+                    pointer_candidates = data.get("pointer_candidates", [])
+                else:
+                    pointer_candidates = data.get("pointer_candidates", [])
+                for candidate in pointer_candidates:
+                    # 优先使用pointer_pos，如果没有则使用pointer（两者都是global id）
+                    pointer = candidate.get("pointer_pos") or candidate.get("pointer", [])
                     for idx in pointer:
                         all_icd_indices.add(idx)
         else:
             # 旧格式：从id_list中提取
             for qid, data in beam_data.items():
+                # 跳过_meta等非数字key
+                if qid == "_meta" or not (qid.isdigit() or (isinstance(qid, str) and qid.replace('-', '').replace('_', '').isdigit())):
+                    continue
                 for beam in data["id_list"]:
                     for idx in beam[:-1]:  # 排除最后的query_id
                         all_icd_indices.add(idx)
@@ -655,6 +685,7 @@ def main():
             reward_mode=args.reward_mode,
             hard_weight=args.hard_weight,
             soft_weight=args.soft_weight,
+            rel_weight=getattr(args, 'rel_weight', 0.1),  # relevance权重
             # 兼容旧接口的参数
             reward_alpha=args.reward_alpha,
             reward_beta=args.reward_beta,
@@ -674,6 +705,7 @@ def main():
             reward_mode=args.reward_mode,
             hard_weight=args.hard_weight,
             soft_weight=args.soft_weight,
+            rel_weight=getattr(args, 'rel_weight', 0.1),  # relevance权重
             # 兼容旧接口的参数
             reward_alpha=args.reward_alpha,
             reward_beta=args.reward_beta,
@@ -724,12 +756,16 @@ def main():
     
     print(f"\n创建模型...")
     print(f"  - num_layers: {args.num_layers} (Cross-Attention层数)")
+    print(f"  - label_smoothing: 0.0 (与V2一致，不使用标签平滑)")
+    print(f"  - dropout: 0.5 (与V2一致，强正则化)")
     model = PointerSelectorV3(
         d_model=d_model,
         K=K,
         shot_num=shot_num,
         kl_beta=args.kl_beta,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        label_smoothing=0.0,  # 与V2一致，不使用标签平滑
+        dropout=0.5  # 与V2一致，强正则化
     )
     
     # 如果提供了SFT checkpoint，加载权重
