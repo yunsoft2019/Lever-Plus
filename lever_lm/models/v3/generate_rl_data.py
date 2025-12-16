@@ -30,9 +30,12 @@ import os
 import tempfile
 import sys
 import contextlib
+import re
 from io import StringIO
 from typing import Dict, List, Optional, Tuple
 from collections import Counter
+from difflib import SequenceMatcher
+from datetime import datetime
 from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
 
@@ -409,7 +412,90 @@ def build_vqa_prompt_and_generate(
     else:
         answer = prediction.strip()
     
-    return answer
+    # 获取原始生成结果（postprocess前）
+    raw_generation = prediction
+    
+    # 获取prompt文本（可选）
+    prompt_text = None
+    try:
+        # 使用concat_prompt构建完整的prompt字符串
+        prompt_text = interface.concat_prompt(
+            data_sample_list,
+            add_eos_token=False,
+            is_last_for_generation=True
+        )
+    except Exception as e:
+        # 如果获取prompt失败，设为None
+        prompt_text = None
+    
+    return {
+        "pred_answer": answer,
+        "raw_generation": raw_generation,
+        "prompt_text": prompt_text,
+        "prompt_len": prompt_len,
+    }
+
+
+def _tok(s: str) -> List[str]:
+    """分词函数：按空格/数字/字母分词"""
+    return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def token_f1(a: str, b: str) -> float:
+    """计算token级别的F1分数"""
+    A, B = _tok(a), _tok(b)
+    if len(A) == 0 or len(B) == 0:
+        return 0.0
+    from collections import Counter
+    ca, cb = Counter(A), Counter(B)
+    common = sum((ca & cb).values())
+    prec = common / max(1, len(A))
+    rec = common / max(1, len(B))
+    if prec + rec == 0:
+        return 0.0
+    return 2 * prec * rec / (prec + rec)
+
+
+def edit_sim(a: str, b: str) -> float:
+    """计算字符级编辑相似度"""
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def compute_relevance(pred: str, gt_list: List[str]) -> Dict[str, float]:
+    """
+    计算pred与gt_list的相关性指标
+    
+    Args:
+        pred: 预测答案（postprocessed）
+        gt_list: ground truth答案列表（normalized）
+    
+    Returns:
+        dict包含: vqa_rel_token_f1, vqa_rel_edit_sim, vqa_rel_score
+    """
+    if pred is None:
+        pred = ""
+    pred = pred.strip().lower()
+    gt_list = [(g or "").strip().lower() for g in gt_list]
+    
+    if pred == "" or len(gt_list) == 0:
+        return {
+            "vqa_rel_token_f1": 0.0,
+            "vqa_rel_edit_sim": 0.0,
+            "vqa_rel_score": 0.0
+        }
+    
+    # 计算与每个gt的最大相似度
+    f1_max = max(token_f1(pred, g) for g in gt_list)
+    ed_max = max(edit_sim(pred, g) for g in gt_list)
+    
+    # rel_score取两者最大值（或平均，这里用最大值）
+    rel_score = max(f1_max, ed_max)
+    
+    return {
+        "vqa_rel_token_f1": f1_max,
+        "vqa_rel_edit_sim": ed_max,
+        "vqa_rel_score": rel_score
+    }
 
 
 def compute_expected_vqa_acc_prob(
@@ -652,7 +738,9 @@ def generate_rl_data(
     val_ques_path: Optional[str] = None,
     val_ann_path: Optional[str] = None,
     train_ques_path: Optional[str] = None,
-    train_ann_path: Optional[str] = None
+    train_ann_path: Optional[str] = None,
+    strict_eval: bool = True,  # 严格模式：禁用fallback
+    save_prompts: bool = False  # 是否保存prompt文本
 ) -> Dict:
     """
     生成完整的 RL 数据
@@ -729,6 +817,15 @@ def generate_rl_data(
     print(f"  - 每个温度采样数: {num_samples_per_temp}")
     print(f"  - 随机组合数: {num_random}")
     print(f"  - Retrieval数量: {num_retrieval}")
+    print(f"  - Strict eval: {strict_eval}")
+    
+    # 严格模式检查：必须提供至少一个官方评测文件
+    if strict_eval:
+        if (train_ques_path is None or train_ann_path is None) and (val_ques_path is None or val_ann_path is None):
+            raise ValueError(
+                "strict_eval enabled but no official VQA eval files provided. "
+                "Please provide at least one of: (train_ques_path, train_ann_path) or (val_ques_path, val_ann_path)"
+            )
     
     for query_id_str, query_data in tqdm(beam_data.items(), desc="生成 RL 数据"):
         query_id = int(query_id_str)
@@ -762,7 +859,19 @@ def generate_rl_data(
         query_item = dataset[query_id]
         image = query_item.get("image")
         question = query_item.get("question")
-        gt_answers = query_item.get("answers", [])
+        gt_answers_raw = query_item.get("answers", [])
+        
+        # 处理gt_answers_raw：如果是字典列表，提取answer字段；如果是字符串列表，直接使用
+        if gt_answers_raw and isinstance(gt_answers_raw[0], dict):
+            gt_answers_raw = [ans.get("answer", "") if isinstance(ans, dict) else str(ans) 
+                             for ans in gt_answers_raw]
+        elif gt_answers_raw and isinstance(gt_answers_raw[0], str):
+            gt_answers_raw = gt_answers_raw
+        else:
+            gt_answers_raw = [str(ans) for ans in gt_answers_raw] if gt_answers_raw else []
+        
+        # 归一化ground truth答案（保存到query级别）
+        gt_answers_norm = [vqa_postprocess(ans, model_name="qwen2.5_vl_3B") for ans in gt_answers_raw]
         
         # 优化2: candidate_pool已预构建，直接使用
         # candidate_pool已在循环外预构建
@@ -770,18 +879,17 @@ def generate_rl_data(
         # 对每个 pointer 候选计算 correctness
         pointer_candidates_with_correctness = []
         for c in pointer_candidates:
-            pointer = c["pointer"]
-            
-            # 将 pointer 中的索引映射回原始 candidate 索引
-            original_pointer = [candidate_indices[p] for p in pointer]
+            # 【修复A】pointer是position，不是global id
+            pointer_pos = c["pointer"]  # position in candidate_pool (0..K-1)
+            pointer_global = [candidate_indices[p] for p in pointer_pos]  # global id
             
             try:
-                # 获取示例数据
-                ex1 = candidate_pool[original_pointer[0]]
-                ex2 = candidate_pool[original_pointer[1]]
+                # 【修复A】使用position作为list下标，不是global id
+                ex1 = candidate_pool[pointer_pos[0]]
+                ex2 = candidate_pool[pointer_pos[1]]
                 
-                # 构建 prompt 并生成答案
-                pred_answer = build_vqa_prompt_and_generate(
+                # 构建 prompt 并生成答案（返回更多信息）
+                out = build_vqa_prompt_and_generate(
                     interface=vqa_model,
                     image=image,
                     question=question,
@@ -790,25 +898,33 @@ def generate_rl_data(
                     generation_kwargs=generation_kwargs or {}
                 )
                 
+                pred_answer = out["pred_answer"]
+                raw_generation = out["raw_generation"]
+                prompt_text = out.get("prompt_text") if save_prompts else None
+                prompt_len = out.get("prompt_len")
+                
                 # 计算准确率
                 question_id_str = query_item.get("question_id", str(query_id))
                 
-                # 优先尝试训练集文件（因为 RL 数据通常来自训练集），如果失败再尝试验证集文件
+                # 【改动E】严格模式：禁用fallback
                 used_file_metric = False
+                eval_failed = False
+                eval_split_used = None
                 
                 # 先尝试训练集文件（如果提供）
                 if train_ques_path and train_ann_path:
                     try:
                         correct, acc_score, used_file_metric = compute_vqa_accuracy(
                             pred_answer=pred_answer,
-                            ground_truth_answers=gt_answers,
+                            ground_truth_answers=gt_answers_raw,
                             question_id=question_id_str,
                             val_ques_path=train_ques_path,
                             val_ann_path=train_ann_path,
-                            vqa_cache=vqa_train_cache  # 使用缓存的 VQA 对象
+                            vqa_cache=vqa_train_cache
                         )
+                        if used_file_metric:
+                            eval_split_used = "train"
                     except Exception as e:
-                        # 训练集文件失败，继续尝试验证集文件
                         used_file_metric = False
                 
                 # 如果训练集文件未使用或失败，尝试验证集文件
@@ -816,25 +932,38 @@ def generate_rl_data(
                     try:
                         correct, acc_score, used_file_metric = compute_vqa_accuracy(
                             pred_answer=pred_answer,
-                            ground_truth_answers=gt_answers,
+                            ground_truth_answers=gt_answers_raw,
                             question_id=question_id_str,
                             val_ques_path=val_ques_path,
                             val_ann_path=val_ann_path,
-                            vqa_cache=vqa_val_cache  # 使用缓存的 VQA 对象
+                            vqa_cache=vqa_val_cache
                         )
+                        if used_file_metric:
+                            eval_split_used = "val"
                     except Exception as e:
-                        # 验证集文件也失败，会 fallback 到字符串匹配
                         used_file_metric = False
                 
-                # 如果都失败，使用 fallback（compute_vqa_accuracy 内部会处理）
+                # 【改动E】严格模式：如果都失败，直接跳过或报错
                 if not used_file_metric:
-                    correct, acc_score, used_file_metric = compute_vqa_accuracy(
-                        pred_answer=pred_answer,
-                        ground_truth_answers=gt_answers,
-                        question_id=question_id_str,
-                        val_ques_path=None,  # 强制 fallback
-                        val_ann_path=None
-                    )
+                    if strict_eval:
+                        # 严格模式下，跳过这个candidate
+                        eval_failed = True
+                        correct = 0
+                        acc_score = 0.0
+                    else:
+                        # 非严格模式：使用fallback
+                        correct, acc_score, used_file_metric = compute_vqa_accuracy(
+                            pred_answer=pred_answer,
+                            ground_truth_answers=gt_answers_raw,
+                            question_id=question_id_str,
+                            val_ques_path=None,
+                            val_ann_path=None
+                        )
+                        eval_split_used = "fallback"
+                
+                # 【改动E】严格模式下，跳过eval_failed的candidate
+                if strict_eval and eval_failed:
+                    continue
                 
                 # 统计使用情况
                 total_accuracy_computations += 1
@@ -849,40 +978,79 @@ def generate_rl_data(
                         interface=vqa_model,
                         image=image,
                         question=question,
-                        ground_truth_answers=gt_answers,
+                        ground_truth_answers=gt_answers_raw,
                         ex1=ex1,
                         ex2=ex2
                     )
-                    c["vqa_gt_prob"] = vqa_gt_prob
                 except Exception as e:
-                    print(f"警告：计算 vqa_gt_prob 失败 (query_id={query_id}, pointer={pointer}): {e}")
+                    print(f"警告：计算 vqa_gt_prob 失败 (query_id={query_id}, pointer={pointer_pos}): {e}")
                     import traceback
                     traceback.print_exc()
-                    c["vqa_gt_prob"] = 0.0
+                    vqa_gt_prob = 0.0
+                
+                # 【改动D】计算relevance
+                rel = compute_relevance(pred_answer, gt_answers_norm)
+                
+                # 【改动A】保存pointer信息（pos和global）
+                c["pointer_pos"] = pointer_pos
+                c["pointer"] = pointer_global
+                
+                # 【改动B】保存raw generation和prompt
+                c["vqa_raw_generation"] = raw_generation
+                c["vqa_pred_answer"] = pred_answer
+                if save_prompts and prompt_text:
+                    c["vqa_prompt_text"] = prompt_text
+                    c["vqa_prompt_len"] = prompt_len
                 
                 # 添加 correctness 信息
-                c["vqa_pred_answer"] = pred_answer
                 c["vqa_correct"] = correct
                 c["vqa_acc_score"] = acc_score
-                c["vqa_eval_mode"] = "file" if used_file_metric else "fallback"  # 3.3.1: 标记 reward 质量来源
+                c["vqa_gt_prob"] = vqa_gt_prob
+                
+                # 【改动D】添加relevance信息
+                c.update(rel)
+                
+                # 【改动E】添加eval信息
+                c["vqa_eval_mode"] = "vqaEval" if used_file_metric else "fallback"
+                c["eval_split_used"] = eval_split_used
+                c["eval_failed"] = eval_failed
                 
             except Exception as e:
-                print(f"警告：计算 correctness 失败 (query_id={query_id}, pointer={pointer}): {e}")
+                print(f"警告：计算 correctness 失败 (query_id={query_id}, pointer={pointer_pos}): {e}")
                 import traceback
                 traceback.print_exc()
                 # P0: 错误不要默默变成负样本，添加 eval_failed 标记
-                # 训练时应该跳过这些候选
+                # 严格模式下跳过，非严格模式下标记
+                if strict_eval:
+                    continue  # 严格模式下直接跳过
+                
+                # 非严格模式：标记为错误
+                c["pointer_pos"] = pointer_pos
+                c["pointer"] = pointer_global
+                c["vqa_raw_generation"] = ""
                 c["vqa_pred_answer"] = ""
                 c["vqa_correct"] = 0
                 c["vqa_acc_score"] = 0.0
-                c["vqa_gt_prob"] = 0.0  # P1: 也设为 0
-                c["vqa_eval_mode"] = "error"  # 标记为错误，区别于 fallback
-                c["eval_failed"] = True  # P0: 训练时跳过这些候选
+                c["vqa_gt_prob"] = 0.0
+                c["vqa_rel_token_f1"] = 0.0
+                c["vqa_rel_edit_sim"] = 0.0
+                c["vqa_rel_score"] = 0.0
+                c["vqa_eval_mode"] = "error"
+                c["eval_split_used"] = None
+                c["eval_failed"] = True
             
             pointer_candidates_with_correctness.append(c)
         
-        # 保存到 rl_data
+        # 【改动C】保存到 rl_data，包含query级别的gt_answers
         rl_data[query_id_str] = {
+            "query": {
+                "query_id": query_id,
+                "question_id": query_item.get("question_id", str(query_id)),
+                "image_id": query_item.get("image_id", None),
+                "question": question,
+                "gt_answers_raw": gt_answers_raw,
+                "gt_answers_norm": gt_answers_norm,
+            },
             "pointer_candidates": pointer_candidates_with_correctness
         }
     
@@ -924,6 +1092,9 @@ def main():
     parser.add_argument("--val_path", type=str, help="验证集JSON文件路径（用于VQA数据集）")
     parser.add_argument("--train_coco_root", type=str, help="COCO训练集图片根目录")
     parser.add_argument("--val_coco_root", type=str, help="COCO验证集图片根目录")
+    parser.add_argument("--strict_eval", action="store_true", default=True, help="严格模式：禁用fallback，必须使用官方VQA评测文件")
+    parser.add_argument("--no_strict_eval", dest="strict_eval", action="store_false", help="禁用严格模式（允许fallback）")
+    parser.add_argument("--save_prompts", action="store_true", default=False, help="是否保存prompt文本（会增加文件大小）")
     
     args = parser.parse_args()
     
@@ -1230,16 +1401,50 @@ def main():
         val_ques_path=args.val_ques_path,
         val_ann_path=args.val_ann_path,
         train_ques_path=args.train_ques_path,
-        train_ann_path=args.train_ann_path
+        train_ann_path=args.train_ann_path,
+        strict_eval=args.strict_eval,
+        save_prompts=args.save_prompts
     )
+    
+    # 【改动F】添加_meta信息
+    # 获取VQA模型名称
+    vqa_model_name = args.vqa_model
+    if hasattr(vqa_model, 'model_name'):
+        vqa_model_name = vqa_model.model_name
+    elif "Qwen" in str(type(vqa_model)):
+        vqa_model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
+    
+    # 构建_meta信息
+    meta_info = {
+        "_meta": {
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "vqa_model": vqa_model_name,
+            "task_gen_args": default_generation_kwargs,
+            "eval": {
+                "train_ques_path": args.train_ques_path,
+                "train_ann_path": args.train_ann_path,
+                "val_ques_path": args.val_ques_path,
+                "val_ann_path": args.val_ann_path,
+            },
+            "strict_eval": args.strict_eval,
+            "save_prompts": args.save_prompts,
+            "notes": "RL data v4: save raw response + prompt + gt answers + relevance. pointer_pos vs pointer(global) fixed."
+        }
+    }
+    
+    # 合并_meta和rl_data
+    output_data = {**meta_info, **rl_data}
     
     # 保存
     print(f"保存 RL 数据到: {args.output_path}")
     os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
     with open(args.output_path, "w") as f:
-        json.dump(rl_data, f, indent=2)
+        json.dump(output_data, f, indent=2)
     
     print("✓ RL 数据生成完成！")
+    print(f"  - 总query数: {len(rl_data)}")
+    print(f"  - 严格模式: {args.strict_eval}")
+    print(f"  - 保存prompt: {args.save_prompts}")
 
 
 if __name__ == "__main__":

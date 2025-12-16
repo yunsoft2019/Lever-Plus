@@ -395,8 +395,21 @@ class RLBeamDatasetWithEmbedding(Dataset):
         # 解析RL数据
         self.samples = []
         for query_id_str, query_data in rl_data.items():
-            query_id = int(query_id_str)
-            pointer_candidates = query_data.get("pointer_candidates", [])
+            # 【改动A】跳过_meta等非数字key
+            try:
+                query_id = int(query_id_str)
+            except (ValueError, TypeError):
+                # 跳过_meta等非数字key
+                continue
+            
+            # 支持新格式：query_data可能是{"query": {...}, "pointer_candidates": [...]}
+            # 或旧格式：{"pointer_candidates": [...]}
+            if "query" in query_data:
+                # 新格式：有query字段
+                pointer_candidates = query_data.get("pointer_candidates", [])
+            else:
+                # 旧格式：直接是pointer_candidates
+                pointer_candidates = query_data.get("pointer_candidates", [])
             
             # 过滤生成方法（如果指定）
             if self.filter_gen_methods is not None:
@@ -426,19 +439,26 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 if c.get("vqa_eval_mode") == "error":
                     continue
                 
-                pointer = c["pointer"]
-                assert len(pointer) == shot_num, f"pointer长度不匹配: {len(pointer)} vs {shot_num}"
+                # 【修复A】支持新格式：优先使用pointer_pos（position），否则使用pointer（global id，需要映射）
+                if "pointer_pos" in c:
+                    # 新格式：直接使用pointer_pos（已经是position）
+                    pointer = c["pointer_pos"]
+                    mapped_pointer = pointer  # 已经是position，无需映射
+                else:
+                    # 旧格式：使用pointer（global id），需要映射到position
+                    pointer = c["pointer"]
+                    # 映射pointer中的索引为candidate位置
+                    # 严格检查：如果索引不在 candidate_indices 中，立即报错
+                    mapped_pointer = []
+                    for idx in pointer:
+                        if idx not in self.cand_idx_to_pos:
+                            raise KeyError(
+                                f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
+                                f"(query_id={query_id})"
+                            )
+                        mapped_pointer.append(self.cand_idx_to_pos[idx])
                 
-                # 映射pointer中的索引为candidate位置
-                # 严格检查：如果索引不在 candidate_indices 中，立即报错
-                mapped_pointer = []
-                for idx in pointer:
-                    if idx not in self.cand_idx_to_pos:
-                        raise KeyError(
-                            f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
-                            f"(query_id={query_id})"
-                        )
-                    mapped_pointer.append(self.cand_idx_to_pos[idx])
+                assert len(mapped_pointer) == shot_num, f"pointer长度不匹配: {len(mapped_pointer)} vs {shot_num}"
                 beam_labels.append(mapped_pointer)
                 
                 # 计算组合reward（使用新的 reward_mode）
@@ -460,11 +480,12 @@ class RLBeamDatasetWithEmbedding(Dataset):
                         use_logprob=self.use_logprob
                     )
                 else:
-                    # 非 legacy 模式：传入 correctness 相关参数，包括 vqa_gt_prob
+                    # 非 legacy 模式：传入 correctness 相关参数，包括 vqa_gt_prob 和 vqa_rel_score
                     reward = compute_reward_for_candidate(
                         vqa_correct=c.get("vqa_correct"),
                         vqa_acc_score=c.get("vqa_acc_score"),
                         vqa_gt_prob=c.get("vqa_gt_prob"),  # P1: 传入 vqa_gt_prob
+                        vqa_rel_score=c.get("vqa_rel_score"),  # 【改动B】传入relevance
                         reward_mode=self.reward_mode,
                         hard_weight=self.hard_weight,
                         soft_weight=self.soft_weight,

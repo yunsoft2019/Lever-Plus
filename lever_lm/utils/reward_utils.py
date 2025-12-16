@@ -221,10 +221,12 @@ def compute_reward_for_candidate(
     vqa_correct: Optional[int] = None,
     vqa_acc_score: Optional[float] = None,
     vqa_gt_prob: Optional[float] = None,  # P1: 新增 vqa_gt_prob 支持
+    vqa_rel_score: Optional[float] = None,  # 新增：relevance score支持
     # 新增：reward 模式参数
     reward_mode: str = "hard_plus_soft",
     hard_weight: float = 1.0,
     soft_weight: float = 1.0,
+    rel_weight: float = 0.1,  # relevance权重（默认较小，用于shaping）
     # 兼容旧接口的参数（默认不启用）
     alpha: float = 0.0,
     beta: float = 0.0,
@@ -248,6 +250,7 @@ def compute_reward_for_candidate(
     - "soft_only": reward = soft（只看准确率分数）
     - "hard01_plus_gtprob": reward = hard_weight*hard + soft_weight*gt_prob（P1: 使用 vqa_gt_prob 作为 soft）
     - "hard01_plus_gtprob_separated": 阈值分离，使用 gt_prob（P1: 推荐，正样本 [2*hard_weight, 2*hard_weight+soft_weight]，负样本 [0, soft_weight]）
+    - "hard_plus_gtprob_plus_rel": reward = hard_weight*hard + gt_prob_weight*gt_prob + rel_weight*(1-hard)*rel（推荐：relevance只在错误样本上shaping）
     - "hybrid": 混合 InfoScore 和 correctness（需要 beam_score）
     - "legacy": 使用旧的 alpha/beta 组合方式（兼容旧代码）
     
@@ -257,9 +260,11 @@ def compute_reward_for_candidate(
         vqa_correct: correctness (0/1)（可选）
         vqa_acc_score: VQA 准确率分数 [0,1]（可选）
         vqa_gt_prob: GT 概率（P1: 连续 soft reward，与 VQA metric 对齐）
+        vqa_rel_score: Relevance分数（可选，用于负样本shaping）
         reward_mode: reward 模式（默认 "hard_plus_soft"）
         hard_weight: hard correctness 权重（默认 1.0）
         soft_weight: soft correctness 权重（默认 1.0）
+        rel_weight: relevance权重（默认 0.1，只在错误样本上使用）
         alpha: quality 权重（legacy 模式，默认 0.0）
         beta: correctness 权重（legacy 模式，默认 0.0）
         correctness_mode: correctness 模式（legacy 模式，"01" 或 "pm1"）
@@ -335,6 +340,19 @@ def compute_reward_for_candidate(
         else:
             # 负样本：[0, soft_weight]
             reward = soft_weight * soft
+    
+    elif reward_mode == "hard_plus_gtprob_plus_rel":
+        # 【改动4.2】使用hard + gt_prob + relevance（relevance只在错误样本上shaping）
+        # 按照 2025-12-15需求.md 3.2节：
+        # reward = w_hard * hard + w_prob * vqa_gt_prob + w_rel * (1 - hard) * vqa_rel_score
+        # - hard正确的样本：不需要relevance再加分（避免reward hacking）
+        # - hard错误的样本：给一点"接近程度"信号，缓解稀疏
+        hard = float(vqa_correct) if vqa_correct is not None else 0.0
+        gtprob = float(vqa_gt_prob) if vqa_gt_prob is not None else 0.0
+        rel = float(vqa_rel_score) if vqa_rel_score is not None else 0.0
+        
+        # relevance只在错误样本上使用
+        reward = hard_weight * hard + soft_weight * gtprob + rel_weight * (1.0 - hard) * rel
     
     elif reward_mode == "legacy":
         # 兼容旧的 alpha/beta 组合方式
