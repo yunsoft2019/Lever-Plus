@@ -397,6 +397,7 @@ def evaluate_retriever(
 ):
     retriever_res = {}
     info = base_info + retriever_name
+    eval_split = getattr(cfg, 'eval_split', 'validation')
     
     for shot_num in shot_num_list:
         logger.info(
@@ -421,13 +422,21 @@ def evaluate_retriever(
                 generation_kwargs=generation_kwargs,
             )
         elif cfg.task.task_name == "vqa":
+            # 根据 eval_split 选择正确的问题和标注文件
+            if eval_split == 'train':
+                ques_path = cfg.dataset.train_ques_path
+                ann_path = cfg.dataset.train_ann_path
+            else:
+                ques_path = cfg.dataset.val_ques_path
+                ann_path = cfg.dataset.val_ann_path
+            
             metric = inference_vqa_direct(
                 interface=interface,
                 train_ds=ds["train"],
                 test_ds=ds["validation"],
                 icd_idx_list=icd_idx_list,
-                val_ques_path=cfg.dataset.val_ques_path,
-                val_ann_path=cfg.dataset.val_ann_path,
+                val_ques_path=ques_path,
+                val_ann_path=ann_path,
                 model_name=cfg.infer_model.name,
                 generation_kwargs=generation_kwargs,
             )
@@ -591,6 +600,7 @@ def main(cfg: DictConfig):
 
     test_data_num = cfg.test_data_num
     index_data_num = cfg.index_data_num
+    eval_split = getattr(cfg, 'eval_split', 'validation')  # 默认使用 validation
 
     # 步骤1：加载SFT模型及模型参数，加载推理模型
     logger.info("=" * 60)
@@ -604,6 +614,13 @@ def main(cfg: DictConfig):
         ds["train"] = ds["train"].select(
             random.sample(range(len(ds["train"])), index_data_num)
         )
+    
+    # 根据 eval_split 选择评估数据集
+    if eval_split == 'train':
+        logger.info("使用训练集进行评估")
+        # 使用训练集作为测试集
+        ds["validation"] = ds["train"]
+    
     if test_data_num != -1:
         ds["validation"] = ds["validation"].select(range(test_data_num))
 

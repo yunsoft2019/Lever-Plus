@@ -15,6 +15,7 @@ precision: bf16
 device: cuda
 index_data_num: -1
 test_data_num: -1
+eval_split: validation  # 评估数据集分割：validation（默认）或 train
 
 inference_bs: 1
 

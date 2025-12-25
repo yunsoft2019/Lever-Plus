@@ -247,13 +247,18 @@ def gen_data(
     from datasets import Dataset
     remaining_subset = Dataset.from_list(remaining_subset)
     
+    # 计算已处理的数量，用于进度条显示
+    processed_count = len(final_res)
+    total_count = processed_count + len(remaining_subset)
+    
     for i, test_data in enumerate(
         tqdm(
             remaining_subset,
             disable=(rank != world_size - 1),
-            total=len(remaining_subset),
-            initial=len(final_res),
+            total=total_count,
+            initial=processed_count,
             ncols=100,
+            desc=f"Rank {rank}",
         ),
     ):
         candidate_set = train_ds.select(remaining_cand_set_idx[i])
