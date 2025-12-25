@@ -39,7 +39,8 @@ echo "GPU IDs: $gpu_ids_hydra"
 test_sample_num=${TEST_SAMPLE_NUM:-${sample_num}}
 
 # 注意：gpu_ids 参数不能加引号，否则 Hydra 会将其解析为字符串而不是列表
-python generate_data.py beam_size=5 \
+# 使用 python -u 禁用缓冲，让进度条实时输出
+python -u generate_data.py beam_size=5 \
                         cand_num=64 \
                         sample_num=${test_sample_num} \
                         gpu_ids=${gpu_ids_hydra} \

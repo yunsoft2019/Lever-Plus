@@ -28,8 +28,11 @@
 #   REWARD_MODE: Reward 模式（默认: hard_plus_soft）
 #     - hard_plus_soft: reward = vqa_correct + vqa_acc_score，范围 [0, 2]
 #     - separated: 正样本 [2,3]，负样本 [0,1]（需要数据有足够正样本）
+#     - hard_plus_gtprob_plus_rel: reward = hard*hard_weight + gtprob*soft_weight + rel*(1-hard)*rel_weight
+#       （推荐：负样本也有梯度信号，通过 relevance shaping）
 #   HARD_WEIGHT: Hard correctness 权重（默认: 1.0）
 #   SOFT_WEIGHT: Soft correctness 权重（默认: 1.0）
+#   REL_WEIGHT: Relevance 权重（默认: 0.1，hard_plus_gtprob_plus_rel 模式使用）
 #   USE_RANK_ADVANTAGE: 是否使用排名归一化计算 advantage（默认: false）
 #   RCE_USE_RAW_REWARD: RCE 使用原始 reward（默认: true，保留正负样本的绝对差异）
 #   FREEZE_BACKBONE_IN_GRPO: GRPO 时冻结 backbone（默认: false）
@@ -107,8 +110,13 @@ checkpoint_filename="${model_name_safe}_${sampler_name}_infoscore_left_beam5_sho
 # 文件路径
 query_emb_path="./results/${dataset_name}/cache/query_embeddings.pt"
 cand_emb_path="./results/${dataset_name}/cache/candidate_embeddings.pt"
-# RL 数据路径：按 sampler 和 beam_model 分开保存
-rl_data_path="./results/${dataset_name}/generated_data/rl_data_${sampler_name}_${model_name}.json"
+# RL 数据路径：可通过环境变量 RL_DATA_PATH 指定，否则按 sampler 和 beam_model 自动生成
+if [ -n "${RL_DATA_PATH}" ]; then
+    rl_data_path="${RL_DATA_PATH}"
+    echo "使用自定义 RL 数据路径: ${rl_data_path}"
+else
+    rl_data_path="./results/${dataset_name}/generated_data/rl_data_${sampler_name}_${model_name}.json"
+fi
 
 # 读取 reward 配置（用于输出目录命名）
 reward_mode=${REWARD_MODE:-hard_plus_soft}
@@ -157,6 +165,7 @@ num_layers=${NUM_LAYERS:-1}
 reward_mode=${REWARD_MODE:-hard_plus_soft}
 hard_weight=${HARD_WEIGHT:-1.0}
 soft_weight=${SOFT_WEIGHT:-1.0}
+rel_weight=${REL_WEIGHT:-0.1}  # relevance权重（hard_plus_gtprob_plus_rel模式使用）
 # 3.4、3.5.2 和 3.3.3 新增参数
 # 默认使用 raw reward，保留正负样本的绝对差异
 rce_use_raw_reward=${RCE_USE_RAW_REWARD:-true}
@@ -191,6 +200,9 @@ echo "Reward 参数:"
 echo "  Reward Mode: ${reward_mode}"
 echo "  Hard Weight: ${hard_weight}"
 echo "  Soft Weight: ${soft_weight}"
+if [ "${reward_mode}" == "hard_plus_gtprob_plus_rel" ]; then
+    echo "  Rel Weight: ${rel_weight}"
+fi
 if [ "${rce_use_raw_reward}" == "true" ]; then
     echo "  RCE Reward: 原始 reward (beam_rewards_raw) [显式指定]"
 else
@@ -245,7 +257,15 @@ echo "=========================================="
 
 need_regenerate=false
 
-if [ ! -f "$rl_data_path" ]; then
+# 如果指定了自定义 RL 数据路径，检查文件是否存在，不存在则报错退出
+if [ -n "${RL_DATA_PATH}" ]; then
+    if [ ! -f "$rl_data_path" ]; then
+        echo "❌ 错误：指定的 RL 数据文件不存在: ${rl_data_path}"
+        exit 1
+    fi
+    echo "✓ 使用自定义 RL 数据路径，跳过生成"
+    echo "  - RL Data: ${rl_data_path}"
+elif [ ! -f "$rl_data_path" ]; then
     echo "RL 数据不存在，需要生成"
     need_regenerate=true
 else
@@ -322,7 +342,8 @@ train_cmd="CUDA_VISIBLE_DEVICES=${gpu_id} python -m lever_lm.workflows.grpo_post
     --num_layers ${num_layers} \
     --reward_mode ${reward_mode} \
     --hard_weight ${hard_weight} \
-    --soft_weight ${soft_weight}"
+    --soft_weight ${soft_weight} \
+    --rel_weight ${rel_weight}"
 
 # 3.4: 如果指定使用原始 reward（默认使用归一化后的 reward）
 if [ "${rce_use_raw_reward}" == "true" ]; then

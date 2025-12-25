@@ -95,6 +95,7 @@ class PointerSelectorV3(PointerSelectorV2):
         self.clip_epsilon = clip_epsilon
         self.kl_beta = kl_beta
         self.advantage_clip = advantage_clip
+        self.use_ppo_clip_only = False  # 方案七：只使用 PPO Clip，不使用 KL 惩罚
         
         print(f"✓ PointerSelectorV3 初始化完成（继承V2 + 强化学习）")
         print(f"  - clip_epsilon (PPO裁剪): {clip_epsilon}")
@@ -148,13 +149,17 @@ class PointerSelectorV3(PointerSelectorV2):
         
         Args:
             query_emb: [B, d] query embedding
-            cand_emb: [B, K, d] 候选 embedding
+            cand_emb: [B, K, d] 候选 embedding（K可能因query而异，支持per-query候选池）
             beam_labels: [B, num_beams, S] 多个beam的标签序列
         
         Returns:
             log_probs: [B, num_beams] 每个beam的log概率
         """
         batch_size, num_beams, shot_num = beam_labels.shape
+        
+        # 【关键修复】支持per-query候选池：动态获取每个query的候选池大小
+        # cand_emb的K可能因query而异，不能使用固定的self.K
+        K_actual = cand_emb.shape[1]  # 实际候选池大小
         
         # 展开beam维度
         # query_emb: [B, d] -> [B*num_beams, d]
@@ -163,7 +168,7 @@ class PointerSelectorV3(PointerSelectorV2):
         
         # cand_emb: [B, K, d] -> [B*num_beams, K, d]
         cand_expanded = cand_emb.unsqueeze(1).expand(-1, num_beams, -1, -1)
-        cand_expanded = cand_expanded.reshape(batch_size * num_beams, self.K, -1)
+        cand_expanded = cand_expanded.reshape(batch_size * num_beams, K_actual, -1)
         
         # beam_labels: [B, num_beams, S] -> [B*num_beams, S]
         labels_flat = beam_labels.reshape(batch_size * num_beams, shot_num)
@@ -180,8 +185,7 @@ class PointerSelectorV3(PointerSelectorV2):
         self,
         rewards: torch.Tensor,
         normalize: bool = True,
-        use_rank: bool = False,
-        min_std: float = 0.1
+        use_rank: bool = False
     ) -> torch.Tensor:
         """
         计算组内相对优势（Group-Relative Advantage）
@@ -195,17 +199,16 @@ class PointerSelectorV3(PointerSelectorV2):
         - 组内Z-score：在每个query的5个beam内计算均值和标准差
         - 优势裁剪：限制在[-5, 5]范围内，防止极端梯度
         
-        【优化】默认使用 Z-score 归一化而非排名归一化：
+        【方案5优化】默认关闭 Rank Normalization，使用 Z-score 归一化：
         - 排名归一化会丢失原始 reward 的绝对差异信息
         - 当所有候选都是负样本时，排名归一化仍会产生 [-1, 1] 的 advantage
         - Z-score 归一化保留了 reward 的相对大小关系
-        - 设置 min_std 避免除零，同时保证有意义的 advantage
+        - 设置 min_std=0.1 避免除零，同时保证最小方差
         
         Args:
             rewards: [B, num_beams] 每个beam的奖励（分数）
             normalize: 是否进行组内Z-score归一化
-            use_rank: 是否使用基于排名的归一化（默认 False）
-            min_std: Z-score 归一化时的最小标准差（默认 0.1）
+            use_rank: 是否使用基于排名的归一化（默认 False，关闭 Rank Normalization）
         
         Returns:
             advantages: [B, num_beams] 组内相对优势
@@ -213,32 +216,20 @@ class PointerSelectorV3(PointerSelectorV2):
         batch_size, num_beams = rewards.shape
         
         if use_rank:
-            # 基于排名的归一化（可选，适用于 reward 差异极小的情况）
-            # 获取排名（降序，最高reward排名为0）
+            # 排名归一化（当前方式，会压缩 advantage）
             ranks = rewards.argsort(dim=-1, descending=True).argsort(dim=-1).float()
-            # 归一化到 [-1, 1]
-            # 排名最高(0) -> 1.0, 排名最低(num_beams-1) -> -1.0
             if num_beams > 1:
                 advantages = 1.0 - 2.0 * ranks / (num_beams - 1)
             else:
                 advantages = torch.zeros_like(ranks)
         else:
-            # 【推荐】Z-score 归一化
-            # 保留原始 reward 的绝对差异信息
+            # Z-score 归一化（推荐，保留原始差异）
             mean = rewards.mean(dim=-1, keepdim=True)
-            
-            if normalize:
-                std = rewards.std(dim=-1, keepdim=True)
-                # 设置最小 std，避免除零，同时保证有意义的 advantage
-                std = torch.clamp(std, min=min_std)
-                advantages = (rewards - mean) / std
-            else:
-                # 不归一化，只减去均值
-                advantages = rewards - mean
+            std = rewards.std(dim=-1, keepdim=True)
+            std = torch.clamp(std, min=0.1)  # 避免除零，同时保证最小方差
+            advantages = (rewards - mean) / std
         
-        # 优势裁剪：限制在[-advantage_clip, advantage_clip]范围内
         advantages = torch.clamp(advantages, -self.advantage_clip, self.advantage_clip)
-        
         return advantages
     
     def compute_kl_divergence(
@@ -314,10 +305,13 @@ class PointerSelectorV3(PointerSelectorV2):
             labels = beam_labels[:, 0, :]  # [B, S]
             
             # 直接计算交叉熵损失
-            result = self.forward(query_emb, cand_emb, labels=labels, return_loss=False)
-            logits = result['logits']  # [B, S, K]
+            # 【关键修复】支持per-query候选池：动态获取实际的候选池大小
+            actual_K = cand_emb.shape[1]  # 实际候选池大小（可能因query而异）
             
-            logits_for_loss = logits.reshape(-1, self.K)  # [B*S, K]
+            result = self.forward(query_emb, cand_emb, labels=labels, return_loss=False)
+            logits = result['logits']  # [B, S, actual_K]
+            
+            logits_for_loss = logits.reshape(-1, actual_K)  # [B*S, actual_K]
             labels_for_loss = labels.reshape(-1)  # [B*S]
             logits_for_loss = torch.clamp(logits_for_loss, min=-100.0)
             
@@ -344,19 +338,22 @@ class PointerSelectorV3(PointerSelectorV2):
         # 展开beam维度: [B, num_beams, S] -> [B*num_beams, S]
         labels_flat = beam_labels.reshape(batch_size * num_beams, shot_num)
         
+        # 【关键修复】支持per-query候选池：动态获取实际的候选池大小
+        actual_K = cand_emb.shape[1]  # 实际候选池大小（可能因query而异）
+        
         # 扩展query和cand: [B, d] -> [B*num_beams, d]
         query_expanded = query_emb.unsqueeze(1).expand(-1, num_beams, -1)
         query_expanded = query_expanded.reshape(batch_size * num_beams, -1)
         
         cand_expanded = cand_emb.unsqueeze(1).expand(-1, num_beams, -1, -1)
-        cand_expanded = cand_expanded.reshape(batch_size * num_beams, self.K, -1)
+        cand_expanded = cand_expanded.reshape(batch_size * num_beams, actual_K, -1)
         
         # 前向传播
         result = self.forward(query_expanded, cand_expanded, labels=labels_flat, return_loss=False)
-        logits = result['logits']  # [B*num_beams, S, K]
+        logits = result['logits']  # [B*num_beams, S, actual_K]
         
         # 计算每个样本的交叉熵损失
-        logits_for_loss = logits.reshape(-1, self.K)  # [B*num_beams*S, K]
+        logits_for_loss = logits.reshape(-1, actual_K)  # [B*num_beams*S, actual_K]
         labels_for_loss = labels_flat.reshape(-1)  # [B*num_beams*S]
         logits_for_loss = torch.clamp(logits_for_loss, min=-100.0)
         
@@ -459,10 +456,14 @@ class PointerSelectorV3(PointerSelectorV2):
         
         # 计算KL散度
         kl = self.compute_kl_divergence(new_log_probs, old_log_probs)
-        kl_loss = self.kl_beta * kl
         
-        # 总损失
-        total_loss = ppo_loss + kl_loss
+        # 方案七：只使用 PPO Clip，不使用 KL 惩罚
+        if self.use_ppo_clip_only:
+            kl_loss = torch.tensor(0.0, device=ppo_loss.device)
+            total_loss = ppo_loss
+        else:
+            kl_loss = self.kl_beta * kl
+            total_loss = ppo_loss + kl_loss
         
         return {
             'loss': total_loss,

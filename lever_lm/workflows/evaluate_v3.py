@@ -319,8 +319,17 @@ def main():
     else:
         all_icd_indices = set()
         # 检测数据格式：新格式（pointer_candidates）或旧格式（id_list）
-        first_key = list(beam_data.keys())[0]
-        first_data = beam_data[first_key]
+        # 跳过 _meta 键，找到第一个实际数据
+        first_key = None
+        first_data = None
+        for key in beam_data.keys():
+            if key != '_meta':
+                first_key = key
+                first_data = beam_data[key]
+                break
+        
+        if first_data is None:
+            raise ValueError("数据文件中没有找到有效的query数据（只有_meta）")
         
         if "pointer_candidates" in first_data:
             # 新格式：RL数据
@@ -353,21 +362,20 @@ def main():
     d_model = img_emb_data.shape[1]
     print(f"Embedding维度: {d_model}")
     
-    # 候选池embedding
+    # 【关键修改】支持per-query候选池：不再使用共享的candidate_embeddings
+    # 每个query将使用它自己的候选池（从beam_data中提取）
+    print(f"\n【Per-Query候选池】每个query将使用自己独立的候选池（从beam_data中提取，限制为64）")
+    
+    # 为了向后兼容，保留candidate_indices和candidate_embeddings，但实际不会使用
     if args.full_train_set:
         candidate_indices = list(range(img_emb_data.shape[0]))
-        candidate_embeddings = img_emb_data  # 使用全部训练集
-        K = img_emb_data.shape[0]
-        print(f"候选池大小: {K} (完整训练集)")
+        K_shared = img_emb_data.shape[0]
+        print(f"候选池大小: {K_shared} (完整训练集，但每个query仍使用自己的候选池)")
     else:
-        candidate_embeddings = img_emb_data[candidate_indices]  # [K, d]
+        K_shared = len(candidate_indices)
+        print(f"候选池大小: {K_shared} (从beam_data提取，但每个query仍使用自己的候选池)")
     
-    # 可选：限制候选池大小（用于测试泛化问题）
-    if args.candidate_size is not None and args.candidate_size < K:
-        print(f"\n[限制候选池] 从 {K} 减少到 {args.candidate_size}")
-        candidate_indices = candidate_indices[:args.candidate_size]
-        candidate_embeddings = candidate_embeddings[:args.candidate_size]
-        K = args.candidate_size
+    # 不再限制共享候选池大小，因为每个query使用自己的候选池
     
     # 3. 加载V3模型
     print(f"\n加载检查点: {args.grpo_ckpt}")
@@ -389,9 +397,10 @@ def main():
     else:
         model_state = ckpt
     
-    # 【自动检测架构】检查checkpoint的d_model和num_layers
+    # 【自动检测架构】检查checkpoint的d_model、num_layers和K值
     detected_d_model = None
     detected_num_layers = 1  # 默认单层
+    detected_K = None  # 从checkpoint中检测K值
     is_adapter_format = False
     
     # 检测是否是PointerSelectorAdapter格式
@@ -401,12 +410,18 @@ def main():
         # 检测是否有多层cross_attn
         if 'pointer_selector.cross_attn_layers.0.in_proj_weight' in model_state:
             detected_num_layers = sum(1 for k in model_state if 'cross_attn_layers' in k and 'in_proj_weight' in k)
-        print(f"  检测到Adapter格式: d_model={detected_d_model}, num_layers={detected_num_layers}")
+        # 检测K值（从cand_proj.weight推断）
+        if 'pointer_selector.cand_proj.weight' in model_state:
+            detected_K = model_state['pointer_selector.cand_proj.weight'].shape[0]
+        print(f"  检测到Adapter格式: d_model={detected_d_model}, num_layers={detected_num_layers}, K={detected_K}")
     elif 'input_proj.weight' in model_state:
         detected_d_model = model_state['input_proj.weight'].shape[1]
         if 'cross_attn_layers.0.in_proj_weight' in model_state:
             detected_num_layers = sum(1 for k in model_state if 'cross_attn_layers' in k and 'in_proj_weight' in k)
-        print(f"  检测到直接格式: d_model={detected_d_model}, num_layers={detected_num_layers}")
+        # 检测K值（从cand_proj.weight推断）
+        if 'cand_proj.weight' in model_state:
+            detected_K = model_state['cand_proj.weight'].shape[0]
+        print(f"  检测到直接格式: d_model={detected_d_model}, num_layers={detected_num_layers}, K={detected_K}")
     
     # 检查d_model是否与embeddings匹配
     if detected_d_model is not None and detected_d_model != d_model:
@@ -414,6 +429,15 @@ def main():
         print(f"   checkpoint使用的CLIP模型与embeddings不同，需要重新生成embeddings或使用匹配的checkpoint")
         print(f"   当前将使用d_model={detected_d_model}，但评估结果可能不正确")
         d_model = detected_d_model
+    
+    # 【关键修复】K值无法从checkpoint权重中推断（cand_proj的权重与K值无关）
+    # 应该使用per-query候选池的标准大小（64），与训练时一致
+    # 注意：模型权重与K值无关，可以处理任意大小的K值（通过动态reshape）
+    K = 64  # per-query候选池的标准大小（与RL数据生成和训练时一致）
+    print(f"\n✓ 使用K值: {K} (per-query候选池大小，与训练时一致)")
+    if detected_K is not None and detected_K != K:
+        print(f"  ⚠️  注意: checkpoint中检测到的K值({detected_K})与使用的K值({K})不同")
+        print(f"    但这不影响模型加载，因为模型权重与K值无关")
     
     # 处理Adapter格式的权重映射
     if is_adapter_format:
@@ -447,7 +471,7 @@ def main():
     
     model = PointerSelectorV3(
         d_model=d_model,
-        K=K,
+        K=K,  # 使用从checkpoint检测到的K值
         shot_num=args.shot_num,
         num_layers=max(detected_num_layers, 1)  # 至少1层
     )
@@ -504,8 +528,28 @@ def main():
     # 5. 使用V3模型进行范例选择
     print(f"\n使用V3模型选择范例...")
     
-    # 构建位置到原始索引的映射
-    pos_to_idx = {pos: idx for pos, idx in enumerate(candidate_indices)}
+    # 【关键修改】为每个query提取它自己的候选索引（per-query候选池）
+    # 构建query_id到候选索引的映射
+    query_candidate_indices_map = {}
+    for qid, data in beam_data.items():
+        if qid == '_meta' or not (qid.isdigit() or (isinstance(qid, str) and qid.replace('-', '').replace('_', '').isdigit())):
+            continue
+        # 提取该query的候选索引
+        query_candidate_indices_set = set()
+        if "pointer_candidates" in data:
+            for candidate in data.get("pointer_candidates", []):
+                pointer = candidate.get("pointer", [])
+                for idx in pointer:
+                    query_candidate_indices_set.add(idx)
+        elif "id_list" in data:
+            for beam in data["id_list"]:
+                for idx in beam[:-1]:
+                    query_candidate_indices_set.add(idx)
+        query_candidate_indices = sorted(list(query_candidate_indices_set))
+        # 限制候选池大小为64（与RL数据生成时一致）
+        if len(query_candidate_indices) > 64:
+            query_candidate_indices = query_candidate_indices[:64]
+        query_candidate_indices_map[int(qid)] = query_candidate_indices
     
     # 【修复】根据d_model选择正确的CLIP模型
     if d_model == 512:
@@ -533,17 +577,32 @@ def main():
             batch_query_emb = clip_model(**clip_inputs).image_embeds  # [B, d]
             batch_query_emb = batch_query_emb / batch_query_emb.norm(dim=-1, keepdim=True)  # L2归一化
         
-        # 扩展候选embedding
-        batch_cand_emb = candidate_embeddings.unsqueeze(0).expand(batch_size, -1, -1).to(device)
+        # 【关键修改】为每个query使用它自己的候选池
+        batch_preds = []
+        for i in range(batch_size):
+            test_idx = start_idx + i
+            query_id = test_ds[test_idx]["idx"]
+            
+            # 获取该query的候选索引
+            if query_id in query_candidate_indices_map:
+                query_candidate_indices = query_candidate_indices_map[query_id]
+            else:
+                # 如果beam_data中没有该query，使用共享候选池（向后兼容）
+                query_candidate_indices = candidate_indices[:64] if len(candidate_indices) > 64 else candidate_indices
+            
+            # 提取该query的候选embedding
+            query_cand_emb = img_emb_data[query_candidate_indices].unsqueeze(0).to(device)  # [1, K_query, d]
+            query_emb = batch_query_emb[i:i+1]  # [1, d]
+            
+            # 预测
+            with torch.no_grad():
+                preds, _ = predict_with_v3(model, query_emb, query_cand_emb)
+            
+            # 转换为原始索引（query_candidate_indices中的位置 -> global ID）
+            original_indices = [query_candidate_indices[p.item()] for p in preds[0]]
+            batch_preds.append(original_indices)
         
-        # 预测
-        with torch.no_grad():
-            preds, _ = predict_with_v3(model, batch_query_emb, batch_cand_emb)
-        
-        # 转换为原始索引
-        for pred in preds:
-            original_indices = [pos_to_idx[p.item()] for p in pred]
-            icd_idx_list.append(original_indices)
+        icd_idx_list.extend(batch_preds)
     
     print(f"✓ 范例选择完成: {len(icd_idx_list)}个样本")
     print(f"  示例 (样本0): {icd_idx_list[0]}")
@@ -566,9 +625,12 @@ def main():
         # 初始化VLM
         interface = init_simple_vlm_interface(args.model_name, args.dataset, args.device)
         
+        # 使用与icl_inference.py完全相同的generation_kwargs（来自configs/task/vqa.yaml）
         generation_kwargs = {
-            "max_new_tokens": 20,
-            "do_sample": False,
+            "max_new_tokens": 5,
+            "num_beams": 3,
+            "length_penalty": 0.0,
+            "min_new_tokens": 0,
         }
         
         # 运行VQA推理

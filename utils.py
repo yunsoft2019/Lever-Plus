@@ -306,16 +306,31 @@ def caption_postprocess(text, model_name):
 
 
 def vqa_postprocess(text, model_name):
+    # 确保text不是None
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
+    
     if "flamingo" in model_name:
-        return postprocess_vqa_generation(text)
+        result = postprocess_vqa_generation(text)
     elif "idefics" in model_name:
-        return postprocess_vqa_generation(text).replace("\n", "")
+        result = postprocess_vqa_generation(text)
+        if result is not None:
+            result = result.replace("\n", "")
+        else:
+            result = ""
     elif "qwen" in model_name.lower() or "Qwen" in model_name:
         # Qwen2.5-VL uses the same postprocessing as flamingo
-        return postprocess_vqa_generation(text)
+        result = postprocess_vqa_generation(text)
     else:
         # Default: use postprocess_vqa_generation for unknown models
-        return postprocess_vqa_generation(text)
+        result = postprocess_vqa_generation(text)
+    
+    # 确保返回值不是None
+    if result is None:
+        result = ""
+    return result
 
 
 def parse_checkpoint_filename(checkpoint_path):

@@ -491,7 +491,7 @@ def main(cfg: DictConfig):
             checkpoint_info = parse_checkpoint_filename(lever_lm_path)
             
             # 从检查点路径中提取版本信息
-            # 路径格式: ./results/{dataset}/model_cpk/{version}/...
+            # 路径格式: ./results/{dataset}/model_cpk/{version}/... 或 v3_RandSampler_...
             version = "v0"  # 默认版本
             if lever_lm_path:
                 path_parts = lever_lm_path.split('/')
@@ -500,22 +500,52 @@ def main(cfg: DictConfig):
                     if idx + 1 < len(path_parts):
                         potential_version = path_parts[idx + 1]
                         # 检查是否是版本格式（v0, v1, v2, v3, v4）
-                        if potential_version.startswith('v') and len(potential_version) <= 3:
-                            try:
-                                # 验证版本号是否有效（v0-v4）
-                                version_num = int(potential_version[1:])
-                                if 0 <= version_num <= 4:
-                                    version = potential_version
-                            except ValueError:
-                                pass
+                        # 支持两种格式：v3 或 v3_RandSampler_...
+                        if potential_version.startswith('v'):
+                            # 提取版本号（v3_RandSampler_... -> v3）
+                            version_match = potential_version.split('_')[0]
+                            if len(version_match) <= 3:  # v0, v1, v2, v3, v4
+                                try:
+                                    # 验证版本号是否有效（v0-v4）
+                                    version_num = int(version_match[1:])
+                                    if 0 <= version_num <= 4:
+                                        version = version_match
+                                except ValueError:
+                                    pass
             
             dataset_name = cfg.dataset.name.replace('_local', '')
             infer_model_name = cfg.infer_model.name
             sampler_name = checkpoint_info.get('sampler_name')
             training_params = checkpoint_info.get('training_params')
             
-            if sampler_name and training_params:
-                result_filename = f"{infer_model_name}_{sampler_name}_{training_params}_metrics.json"
+            # 如果无法从文件名解析，尝试从路径中提取信息
+            if (not sampler_name or not training_params) and lever_lm_path:
+                import re
+                # 从路径中提取 sampler_name（如 RandSampler, TextSimSampler 等）
+                if not sampler_name:
+                    sampler_match = re.search(r'(RandSampler|TextSimSampler|ImgSimSampler|MixSampler)', lever_lm_path)
+                    if sampler_match:
+                        sampler_name = sampler_match.group(1)
+                        logger.info(f"从路径中提取 sampler_name: {sampler_name}")
+                
+                # 从路径中提取 KL_BETA 和 epoch 信息
+                if not training_params:
+                    kl_match = re.search(r'kl0?(\d+\.?\d*)', lever_lm_path)
+                    epoch_match = re.search(r'epoch(\d+)', lever_lm_path)
+                    if kl_match or epoch_match:
+                        kl_beta_str = f"kl{kl_match.group(1)}" if kl_match else "unknown_kl"
+                        epoch_str = f"epoch{epoch_match.group(1)}" if epoch_match else "unknown_epoch"
+                        training_params = f"{kl_beta_str}_{epoch_str}"
+                        logger.info(f"从路径中提取训练参数: {training_params}")
+            
+            # 如果提取到了 training_params，即使没有 sampler_name，也使用新格式保存
+            # 这样可以区分不同的 checkpoint（如不同的 KL_BETA 和 epoch）
+            if training_params:
+                if sampler_name:
+                    result_filename = f"{infer_model_name}_{sampler_name}_{training_params}_metrics.json"
+                else:
+                    # 如果没有 sampler_name，只使用 training_params
+                    result_filename = f"{infer_model_name}_{training_params}_metrics.json"
                 # 添加版本目录：results/{dataset}/icl_inference/{version}/
                 result_dir = os.path.join(
                     cfg.result_dir,

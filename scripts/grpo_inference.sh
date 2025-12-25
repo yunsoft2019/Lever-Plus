@@ -16,6 +16,7 @@ OUTPUT_DIR="results/v3_eval"
 BATCH_SIZE=32
 GPU=0
 SKIP_VQA=false
+FULL_TRAIN_SET=false
 
 # 显示帮助
 show_help() {
@@ -36,6 +37,7 @@ show_help() {
     echo "  --batch_size N      批次大小 (默认: 32)"
     echo "  --gpu N             GPU编号 (默认: 0)"
     echo "  --skip_vqa          跳过VQA推理，只做范例选择"
+    echo "  --full_train_set    使用完整训练集作为候选池（而非仅beam_data中的候选）"
     echo "  -h, --help          显示帮助"
     echo ""
     echo "示例："
@@ -102,6 +104,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_VQA=true
             shift
             ;;
+        --full_train_set)
+            FULL_TRAIN_SET=true
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -150,6 +156,7 @@ echo "输出目录: $OUTPUT_DIR"
 echo "批次大小: $BATCH_SIZE"
 echo "GPU: $GPU"
 echo "跳过VQA: $SKIP_VQA"
+echo "使用完整训练集: $FULL_TRAIN_SET"
 echo "========================================"
 
 # 构建命令
@@ -168,6 +175,11 @@ CMD="CUDA_VISIBLE_DEVICES=$GPU python -m lever_lm.workflows.evaluate_v3 \
 # 添加skip_vqa选项
 if [ "$SKIP_VQA" = true ]; then
     CMD="$CMD --skip_vqa"
+fi
+
+# 添加full_train_set选项
+if [ "$FULL_TRAIN_SET" = true ]; then
+    CMD="$CMD --full_train_set"
 fi
 
 # 运行推理

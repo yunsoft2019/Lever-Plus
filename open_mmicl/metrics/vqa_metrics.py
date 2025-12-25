@@ -556,6 +556,41 @@ def compute_vqa_accuracy(result_json_path, question_json_path, annotation_json_p
 
 
 def postprocess_vqa_generation(predictions):
-    answer = re.split("Question|Answer|Short", predictions, 1)[0]
-    answer = re.split(", ", answer, 1)[0]
-    return answer
+    # 首先检查None
+    if predictions is None:
+        return ""
+    
+    # 转换为字符串
+    if not isinstance(predictions, str):
+        try:
+            predictions = str(predictions) if predictions is not None else ""
+        except Exception:
+            return ""
+    
+    # 再次确保predictions是字符串
+    if not isinstance(predictions, str) or predictions is None:
+        return ""
+    
+    try:
+        # 使用re.split处理
+        parts = re.split("Question|Answer|Short", predictions, 1)
+        if len(parts) == 0:
+            return ""
+        answer = parts[0]
+        
+        # 再次split处理逗号
+        parts2 = re.split(", ", answer, 1)
+        if len(parts2) == 0:
+            return ""
+        answer = parts2[0]
+        
+        # 确保answer不是None且是字符串
+        if answer is None:
+            return ""
+        if not isinstance(answer, str):
+            answer = str(answer) if answer is not None else ""
+        
+        return answer
+    except Exception as e:
+        # 如果处理失败，返回空字符串
+        return ""

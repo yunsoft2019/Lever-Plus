@@ -253,7 +253,13 @@ class Qwen2VLInterface(LVLMInterface):
             for item in ice_data_sample_list
         ]
         for ice_prompt in ice_prompt_list:
-            prompt += ice_prompt.strip(" ") + self.icd_join_char
+            # 确保ice_prompt不是None且是字符串
+            if ice_prompt is None:
+                continue
+            if not isinstance(ice_prompt, str):
+                ice_prompt = str(ice_prompt) if ice_prompt is not None else ""
+            if ice_prompt:
+                prompt += ice_prompt.strip(" ") + self.icd_join_char
 
         prompt += query_prompt
         if is_last_for_generation:
@@ -289,7 +295,12 @@ class Qwen2VLInterface(LVLMInterface):
                     content.append({"type": "image", "image": item_is_img})
                 else:
                     # Extract text from the item
-                    text = item.strip(" ")
+                    # 确保item不是None且是字符串
+                    if item is None:
+                        continue
+                    if not isinstance(item, str):
+                        item = str(item) if item is not None else ""
+                    text = item.strip(" ") if item else ""
                     if text:
                         content.append({"type": "text", "text": text})
             
@@ -304,7 +315,17 @@ class Qwen2VLInterface(LVLMInterface):
                 all_messages.append(message)
             else:
                 # Fallback: pure text
-                text_content = " ".join([item.strip() for item in sample if not self.is_img(item)])
+                text_items = []
+                for item in sample:
+                    if self.is_img(item):
+                        continue
+                    if item is None:
+                        continue
+                    if not isinstance(item, str):
+                        item = str(item) if item is not None else ""
+                    if item:
+                        text_items.append(item.strip())
+                text_content = " ".join(text_items)
                 message = []
                 # Add system prompt if configured
                 if self.system_prompt:

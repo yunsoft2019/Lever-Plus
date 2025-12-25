@@ -95,6 +95,7 @@ class GRPOTrainer:
         self.kl_target_min = kl_target_min
         self.kl_target_max = kl_target_max
         self.kl_adjustment_factor = kl_adjustment_factor
+        self.disable_adaptive_kl = False  # 默认启用自适应 KL，将在 main() 中设置
         
         # 训练配置
         self.gradient_clip = gradient_clip
@@ -181,9 +182,27 @@ class GRPOTrainer:
                 reward_for_rce = beam_rewards
                 reward_type = "normalized"
             
-            # 调试信息：第一个batch打印reward统计
-            if epoch == 0 and batch_idx == 0:
-                print(f"\n[DEBUG] RCE训练使用的reward类型: {reward_type}")
+            # 调试信息：打印reward统计（详细版本）
+            # 【关键修复】不仅打印第一个batch，还要打印有不同reward值的batch
+            batch_size, num_beams = reward_for_rce.shape
+            has_varied_rewards = False
+            for b in range(batch_size):
+                rewards_b = reward_for_rce[b]
+                if rewards_b.max() != rewards_b.min():
+                    has_varied_rewards = True
+                    break
+            
+            # 打印条件：第一个batch 或 遇到有不同reward值的batch（前20个batch内）
+            should_print = (epoch == 0 and batch_idx == 0) or (epoch == 0 and has_varied_rewards and batch_idx < 20)
+            
+            if should_print:
+                # 获取query_id（batch_size=1时，query_id是标量或单个元素）
+                query_id_val = batch.get("query_id")
+                if isinstance(query_id_val, list):
+                    query_id_val = query_id_val[0] if len(query_id_val) > 0 else "unknown"
+                
+                print(f"\n[DEBUG] RCE训练 - Epoch {epoch}, Batch {batch_idx}, Query {query_id_val}")
+                print(f"  使用的reward类型: {reward_type}")
                 print(f"  beam_rewards_raw: mean={beam_rewards_raw.mean().item():.6f}, std={beam_rewards_raw.std().item():.6f}, min={beam_rewards_raw.min().item():.6f}, max={beam_rewards_raw.max().item():.6f}")
                 print(f"  beam_rewards: mean={beam_rewards.mean().item():.6f}, std={beam_rewards.std().item():.6f}, min={beam_rewards.min().item():.6f}, max={beam_rewards.max().item():.6f}")
                 print(f"  reward_for_rce: mean={reward_for_rce.mean().item():.6f}, std={reward_for_rce.std().item():.6f}, min={reward_for_rce.min().item():.6f}, max={reward_for_rce.max().item():.6f}")
@@ -191,6 +210,27 @@ class GRPOTrainer:
                 if not torch.allclose(beam_rewards_raw, beam_rewards, atol=1e-6):
                     diff = (beam_rewards_raw - beam_rewards).abs()
                     print(f"  最大差异: {diff.max().item():.6f}")
+                
+                # 【关键修复】打印每个query的每个beam的具体reward值
+                print(f"\n[DEBUG] 每个query的每个beam的reward值（batch_size={batch_size}, num_beams={num_beams}）:")
+                for b in range(batch_size):
+                    rewards_b = reward_for_rce[b]
+                    raw_rewards_b = beam_rewards_raw[b].cpu().tolist()
+                    print(f"  Query {query_id_val} (batch内索引={b}):")
+                    print(f"    raw_rewards: {raw_rewards_b}")
+                    print(f"    reward_for_rce: {rewards_b.cpu().tolist()}")
+                    # 计算softmax权重（用于验证）
+                    weights_b = torch.softmax(reward_for_rce[b] / temperature, dim=-1).cpu().tolist()
+                    print(f"    softmax_weights (τ={temperature:.3f}): {[f'{w:.4f}' for w in weights_b]}")
+                    
+                    # 检查是否有问题：如果所有reward都相同，给出警告
+                    if rewards_b.max() == rewards_b.min():
+                        print(f"    ⚠️  警告：所有beam reward都相同（={rewards_b[0].item():.6f}），RCE无法学习到偏好！")
+                    else:
+                        print(f"    ✓ 有不同reward值，可以学习到偏好")
+                        # 打印具体的reward值差异
+                        unique_rewards = sorted(set(rewards_b.cpu().tolist()), reverse=True)
+                        print(f"    不同reward值: {unique_rewards}")
             
             optimizer.zero_grad()
             
@@ -288,13 +328,14 @@ class GRPOTrainer:
                     metrics[k] += result[k].item()
             num_batches += 1
             
-            # KL自适应调整
-            current_kl = result["kl"].item()
-            self.model.kl_beta = adaptive_kl_beta(
-                current_kl, self.model.kl_beta,
-                self.kl_target_min, self.kl_target_max,
-                self.kl_adjustment_factor
-            )
+            # KL自适应调整（可通过 disable_adaptive_kl 禁用）
+            if not self.disable_adaptive_kl:
+                current_kl = result["kl"].item()
+                self.model.kl_beta = adaptive_kl_beta(
+                    current_kl, self.model.kl_beta,
+                    self.kl_target_min, self.kl_target_max,
+                    self.kl_adjustment_factor
+                )
         
         # 平均指标
         for k in metrics:
@@ -395,9 +436,11 @@ class GRPOTrainer:
                 print("✓ Checkpoint 参数完全匹配，加载成功")
         
         # 创建SFT模型副本用于计算old_log_probs
+        # 【关键修复】SFT模型的K值应该与主模型一致（支持per-query候选池）
+        # 由于模型会动态处理不同的候选池大小，K值设置为64（每个query的最大候选池大小）
         sft_model = PointerSelectorV3(
             d_model=self.model.d_model,
-            K=self.model.K,
+            K=self.model.K,  # 使用主模型的K值（64，支持per-query候选池）
             shot_num=self.model.shot_num,
             num_layers=self.model.num_layers,
             label_smoothing=0.0,  # 与V2一致，不使用标签平滑
@@ -519,8 +562,13 @@ def main():
     parser.add_argument("--grpo_epochs", type=int, default=0, help="GRPO训练epochs（推荐0，即RCE-only模式；GRPO仅作为可选实验功能）")
     parser.add_argument("--batch_size", type=int, default=32, help="批次大小")
     parser.add_argument("--rce_lr", type=float, default=1e-4, help="RCE学习率")
+    parser.add_argument("--rce_temp_start", type=float, default=2.0, help="RCE温度起始值（默认2.0，建议从头训练时用0.5）")
+    parser.add_argument("--rce_temp_end", type=float, default=0.5, help="RCE温度结束值（默认0.5，建议从头训练时用0.1）")
     parser.add_argument("--grpo_lr", type=float, default=1e-5, help="GRPO学习率")
     parser.add_argument("--kl_beta", type=float, default=0.1, help="KL散度权重（越大越保守）")
+    parser.add_argument("--disable_adaptive_kl", action="store_true", help="禁用自适应KL调整，使用固定的kl_beta值")
+    parser.add_argument("--use_ppo_clip_only", action="store_true", help="方案七：只使用PPO Clip约束，不使用KL惩罚（设置kl_beta=0）")
+    parser.add_argument("--clip_epsilon", type=float, default=0.2, help="PPO Clip参数ε（默认0.2）")
     parser.add_argument("--device", type=str, default="cuda:0", help="设备")
     parser.add_argument("--use_top1_only", action="store_true", help="只使用Top-1 beam训练（回归V2监督学习方式）")
     # 新的 Reward 参数（推荐使用）
@@ -552,6 +600,14 @@ def main():
     # 正样本挖掘：只保留至少有一个正样本的 query
     parser.add_argument("--require_positive_query", action="store_true",
                         help="只保留至少有一个正样本（vqa_correct=1）的 query 进行训练。用于正样本挖掘后的高质量数据训练")
+    parser.add_argument("--normalize_method", type=str, default="z_score_clamp", 
+                        choices=["z_score", "z_score_clamp", "rank_normalize"],
+                        help="Reward归一化方法（默认: z_score_clamp，避免极端值）")
+    parser.add_argument("--normalize_clamp_value", type=float, default=3.0,
+                        help="Z-score clamp范围（默认: 3.0，即[-3, 3]）")
+    # 限制候选池大小（用于与RL数据生成时保持一致）
+    parser.add_argument("--candidate_size", type=int, default=None,
+                        help="限制候选池大小（默认None，使用所有候选；设置为64与RL数据生成时一致）")
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -641,15 +697,47 @@ def main():
         candidate_indices = sorted(list(all_icd_indices))
         K = len(candidate_indices)
         
+        # 【修复】限制候选池大小（但需要确保所有pointer索引都在候选池中）
+        # 注意：如果限制候选池大小，需要确保所有query的pointer索引都在候选池中
+        # 否则会导致KeyError
+        if args.candidate_size is not None and args.candidate_size < K:
+            # 检查是否有query的pointer索引不在前candidate_size个候选索引中
+            first_N_indices = set(candidate_indices[:args.candidate_size])
+            all_pointer_indices = set()
+            for qid, data in beam_data.items():
+                if qid == "_meta" or not (qid.isdigit() or (isinstance(qid, str) and qid.replace('-', '').replace('_', '').isdigit())):
+                    continue
+                if "query" in data:
+                    pointer_candidates = data.get("pointer_candidates", [])
+                else:
+                    pointer_candidates = data.get("pointer_candidates", [])
+                for candidate in pointer_candidates:
+                    pointer = candidate.get("pointer_pos") or candidate.get("pointer", [])
+                    for idx in pointer:
+                        all_pointer_indices.add(idx)
+            
+            # 检查是否有pointer索引不在前N个候选索引中
+            missing_indices = all_pointer_indices - first_N_indices
+            if missing_indices:
+                print(f"\n⚠️  警告：限制候选池大小为 {args.candidate_size} 会导致 {len(missing_indices)} 个pointer索引不在候选池中")
+                print(f"   这些索引包括: {sorted(list(missing_indices))[:10]}...")
+                print(f"   为了确保训练正常，将使用所有候选索引（{K}个）")
+                print(f"   如果需要限制候选池大小，请确保所有query的pointer索引都在前{args.candidate_size}个候选索引中")
+            else:
+                print(f"\n[限制候选池] 从 {K} 减少到 {args.candidate_size}（与RL数据生成时一致）")
+                candidate_indices = candidate_indices[:args.candidate_size]
+                K = args.candidate_size
+        
         # query embedding使用全部数据
         query_embeddings = img_emb_data  # [N, d]
         d_model = query_embeddings.shape[1]
         
-        # candidate embedding只提取候选池中的样本
-        candidate_embeddings = img_emb_data[candidate_indices]  # [K, d]
+        # 【关键修改】支持per-query候选池：传递完整的img_emb_data，而不是共享的candidate_embeddings
+        # 数据集类会为每个query提取它自己的候选池
+        candidate_embeddings = img_emb_data  # [N, d] 传递完整的embedding数据
         
         print(f"Embedding维度: {d_model}")
-        print(f"候选池大小: {K}")
+        print(f"【Per-Query候选池】每个query将使用自己独立的候选池（从该query的pointer_candidates中提取，限制为64）")
         print(f"候选池Embedding形状: {candidate_embeddings.shape}")
         use_real_embedding = True
     else:
@@ -677,10 +765,12 @@ def main():
         train_dataset = RLBeamDatasetWithEmbedding(
             rl_data=train_data,
             query_embeddings=query_embeddings,
-            candidate_embeddings=candidate_embeddings,
-            candidate_indices=candidate_indices,
+            candidate_embeddings=candidate_embeddings,  # 现在是完整的img_emb_data
+            candidate_indices=candidate_indices,  # 不再使用，但保留以兼容旧代码
             shot_num=shot_num,
             normalize_rewards=True,
+            normalize_method=getattr(args, 'normalize_method', 'z_score_clamp'),
+            normalize_clamp_value=getattr(args, 'normalize_clamp_value', 3.0),
             # 新的 reward 参数
             reward_mode=args.reward_mode,
             hard_weight=args.hard_weight,
@@ -697,10 +787,12 @@ def main():
         val_dataset = RLBeamDatasetWithEmbedding(
             rl_data=val_data,
             query_embeddings=query_embeddings,
-            candidate_embeddings=candidate_embeddings,
-            candidate_indices=candidate_indices,
+            candidate_embeddings=candidate_embeddings,  # 现在是完整的img_emb_data
+            candidate_indices=candidate_indices,  # 不再使用，但保留以兼容旧代码
             shot_num=shot_num,
             normalize_rewards=True,
+            normalize_method=getattr(args, 'normalize_method', 'z_score_clamp'),
+            normalize_clamp_value=getattr(args, 'normalize_clamp_value', 3.0),
             # 新的 reward 参数
             reward_mode=args.reward_mode,
             hard_weight=args.hard_weight,
@@ -758,15 +850,31 @@ def main():
     print(f"  - num_layers: {args.num_layers} (Cross-Attention层数)")
     print(f"  - label_smoothing: 0.0 (与V2一致，不使用标签平滑)")
     print(f"  - dropout: 0.5 (与V2一致，强正则化)")
+    
+    # 【关键修复】支持per-query候选池：模型K值应该设置为每个query的最大候选池大小（64）
+    # 而不是共享候选池的大小（6584）
+    # 模型会动态处理不同的候选池大小（通过compute_log_probs_per_beam中的K_actual）
+    model_K = 64  # 每个query的最大候选池大小（与RL数据生成时一致）
+    if data_format == "rl":
+        print(f"  - 【Per-Query候选池】模型K值设置为{model_K}（每个query的最大候选池大小）")
+    else:
+        model_K = K  # 旧格式使用共享候选池大小
+    
     model = PointerSelectorV3(
         d_model=d_model,
-        K=K,
+        K=model_K,
         shot_num=shot_num,
         kl_beta=args.kl_beta,
+        clip_epsilon=args.clip_epsilon,
         num_layers=args.num_layers,
         label_smoothing=0.0,  # 与V2一致，不使用标签平滑
         dropout=0.5  # 与V2一致，强正则化
     )
+    
+    # 方案七：只使用 PPO Clip，不使用 KL 惩罚
+    if args.use_ppo_clip_only:
+        model.use_ppo_clip_only = True
+        print(f"✓ 方案七已启用：只使用 PPO Clip (ε={args.clip_epsilon})，不使用 KL 惩罚")
     
     # 如果提供了SFT checkpoint，加载权重
     if args.sft_ckpt:
@@ -854,12 +962,17 @@ def main():
         val_loader=val_loader,
         device=device,
         rce_lr=args.rce_lr,
+        rce_temp_start=args.rce_temp_start,
+        rce_temp_end=args.rce_temp_end,
         grpo_lr=args.grpo_lr,
         rce_epochs=args.rce_epochs,
         grpo_epochs=args.grpo_epochs,
         use_top1_only=args.use_top1_only,
         save_dir=args.output_dir
     )
+    
+    # 打印温度配置
+    print(f"✓ RCE 温度调度: {args.rce_temp_start} -> {args.rce_temp_end}")
     
     # 3.4: 设置 RCE 使用 raw reward 开关
     # 默认使用归一化后的 reward（与之前 rce_epoch5.pt 一致，这是最佳配置）
@@ -876,6 +989,11 @@ def main():
     
     # 3.5.2: 设置 GRPO 冻结 backbone 开关
     trainer.freeze_backbone_in_grpo = args.freeze_backbone_in_grpo
+    
+    # 设置禁用自适应 KL 开关
+    trainer.disable_adaptive_kl = args.disable_adaptive_kl
+    if args.disable_adaptive_kl:
+        print(f"✓ 自适应 KL 已禁用，使用固定 kl_beta={model.kl_beta}")
     
     # 3.3.3: 打印 skip_fallback_reward 状态
     if args.skip_fallback_reward:

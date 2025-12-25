@@ -334,6 +334,8 @@ class RLBeamDatasetWithEmbedding(Dataset):
         candidate_indices: List[int],
         shot_num: int = 2,
         normalize_rewards: bool = True,
+        normalize_method: str = "z_score_clamp",  # 归一化方法：z_score, z_score_clamp, rank_normalize
+        normalize_clamp_value: float = 3.0,  # z_score_clamp的clamp范围 [-clamp_value, clamp_value]
         # 新的 reward 参数
         reward_mode: str = "hard_plus_soft",
         hard_weight: float = 1.0,
@@ -376,6 +378,8 @@ class RLBeamDatasetWithEmbedding(Dataset):
         
         self.shot_num = shot_num
         self.normalize_rewards = normalize_rewards
+        self.normalize_method = normalize_method
+        self.normalize_clamp_value = normalize_clamp_value
         self.reward_mode = reward_mode
         self.hard_weight = hard_weight
         self.soft_weight = soft_weight
@@ -389,10 +393,18 @@ class RLBeamDatasetWithEmbedding(Dataset):
         self.require_positive_query = require_positive_query  # 是否只保留有正样本的 query
         
         self.query_embeddings = query_embeddings
-        self.candidate_embeddings = candidate_embeddings
-        
-        # 构建candidate索引映射
-        self.cand_idx_to_pos = {idx: pos for pos, idx in enumerate(candidate_indices)}
+        # 【关键修改】支持per-query候选池：存储完整的img_emb_data，而不是共享的candidate_embeddings
+        # 如果candidate_embeddings是共享的，我们需要使用query_embeddings（完整的img_emb_data）
+        # 否则，使用传入的candidate_embeddings（向后兼容）
+        if candidate_embeddings.shape[0] == query_embeddings.shape[0]:
+            # 如果candidate_embeddings的大小等于query_embeddings，说明是完整的img_emb_data
+            self.img_emb_data = candidate_embeddings  # 完整的embedding数据
+            self.use_per_query_candidate_pool = True
+        else:
+            # 否则，使用共享的candidate_embeddings（向后兼容）
+            self.candidate_embeddings = candidate_embeddings
+            self.cand_idx_to_pos = {idx: pos for pos, idx in enumerate(candidate_indices)}
+            self.use_per_query_candidate_pool = False
         
         # 解析RL数据
         self.samples = []
@@ -441,27 +453,26 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 if c.get("vqa_eval_mode") == "error":
                     continue
                 
-                # 【修复A】支持新格式：优先使用pointer_pos，否则使用pointer
-                # 注意：pointer_pos 和 pointer 都是 global ID，需要映射到 position
-                if "pointer_pos" in c:
-                    # 优先使用pointer_pos（如果存在）
+                # 【修复】支持新格式（K=64修复后）：
+                # - 如果有 pointer_global，说明是修复后的数据，pointer 是局部索引
+                # - 否则，pointer 是全局索引（旧格式）
+                if "pointer_global" in c:
+                    # 新格式（修复后）：pointer 是局部索引，pointer_global 是全局索引
+                    pointer = c["pointer"]  # 局部索引 [0, 63]
+                    is_local_index = True
+                elif "pointer_pos" in c:
+                    # 旧格式：pointer_pos 是全局索引
                     pointer = c["pointer_pos"]
+                    is_local_index = False
                 elif "pointer" in c:
-                    # 使用pointer（如果pointer_pos不存在）
+                    # 旧格式：pointer 是全局索引
                     pointer = c["pointer"]
+                    is_local_index = False
                 else:
                     raise ValueError(f"候选数据中既没有pointer也没有pointer_pos字段 (query_id={query_id})")
                 
-                # 映射pointer中的索引为candidate位置（无论pointer还是pointer_pos都是global ID）
-                # 严格检查：如果索引不在 candidate_indices 中，立即报错
-                mapped_pointer = []
-                for idx in pointer:
-                    if idx not in self.cand_idx_to_pos:
-                        raise KeyError(
-                            f"[RLBeamDatasetWithEmbedding] Pointer index {idx} not in candidate_indices "
-                            f"(query_id={query_id}, candidate_indices范围: {min(self.cand_idx_to_pos.keys()) if self.cand_idx_to_pos else 'N/A'}-{max(self.cand_idx_to_pos.keys()) if self.cand_idx_to_pos else 'N/A'})"
-                        )
-                    mapped_pointer.append(self.cand_idx_to_pos[idx])
+                # 保存pointer
+                mapped_pointer = pointer
                 
                 assert len(mapped_pointer) == shot_num, f"pointer长度不匹配: {len(mapped_pointer)} vs {shot_num}"
                 beam_labels.append(mapped_pointer)
@@ -516,14 +527,87 @@ class RLBeamDatasetWithEmbedding(Dataset):
                 if not has_positive:
                     continue
             
+            # 【关键修改】优先使用 candidate_pool_ids 字段（如果存在）
+            # 这是修复后的数据格式，包含完整的64个候选池索引
+            # 同时检查第一个轨迹是否有 pointer_global 字段来确定索引类型
+            first_candidate = pointer_candidates[0] if pointer_candidates else {}
+            has_pointer_global = "pointer_global" in first_candidate
+            
+            if "candidate_pool_ids" in query_data and has_pointer_global:
+                # 新格式（修复后）：直接使用 candidate_pool_ids
+                # beam_labels 已经是局部索引 [0, 63]，不需要转换
+                query_candidate_indices = query_data["candidate_pool_ids"]
+                use_local_indices = True
+            else:
+                # 旧格式：从轨迹中提取候选索引（beam_labels 是全局索引）
+                query_candidate_indices_set = set()
+                for pointer in beam_labels:  # beam_labels现在包含global ID
+                    for idx in pointer:
+                        query_candidate_indices_set.add(idx)
+                query_candidate_indices = sorted(list(query_candidate_indices_set))
+                use_local_indices = False
+            
+            # 限制候选池大小为64（与RL数据生成时一致）
+            if len(query_candidate_indices) > 64:
+                query_candidate_indices = query_candidate_indices[:64]
+            
             self.samples.append({
                 "query_id": query_id,
-                "beam_labels": beam_labels,  # [num_candidates, shot_num]
+                "beam_labels": beam_labels,  # [num_candidates, shot_num] (局部索引或全局索引)
                 "beam_rewards": beam_rewards,  # [num_candidates]
-                "beam_logprobs": beam_logprobs  # [num_candidates]（可选）
+                "beam_logprobs": beam_logprobs,  # [num_candidates]（可选）
+                "candidate_indices": query_candidate_indices,  # 该query的候选索引（per-query候选池）
+                "use_local_indices": use_local_indices  # 标记是否使用局部索引
             })
         
-        print(f"✓ RLBeamDatasetWithEmbedding 初始化完成")
+        # 【统计1】Unique reward个数分布（用于诊断ties问题）
+        unique_reward_counts = {}  # {unique_count: query_count}
+        reward_range_stats = []  # [(max - min) for each query]
+        
+        for sample in self.samples:
+            rewards = sample["beam_rewards"]
+            if len(rewards) > 0:
+                unique_count = len(set(rewards))
+                unique_reward_counts[unique_count] = unique_reward_counts.get(unique_count, 0) + 1
+                reward_range_stats.append(max(rewards) - min(rewards))
+        
+        # 【统计2】打印前几个query的reward分布，帮助诊断问题
+        print(f"\n[DEBUG] 数据集初始化时的reward分布（前5个query）:")
+        for i, sample in enumerate(self.samples[:5]):
+            rewards = sample["beam_rewards"]
+            print(f"  Query {sample['query_id']}: {len(rewards)}个beam, rewards={rewards}")
+            if len(rewards) > 0:
+                unique_count = len(set(rewards))
+                print(f"    - min={min(rewards):.4f}, max={max(rewards):.4f}, mean={sum(rewards)/len(rewards):.4f}, unique={unique_count}")
+                # 检查是否所有reward都相同
+                if min(rewards) == max(rewards):
+                    print(f"    ⚠️  警告：所有beam的reward都相同（={rewards[0]:.4f}），RCE无法学习到偏好！")
+        
+        # 【统计3】打印unique reward个数分布
+        print(f"\n[REWARD统计] Unique reward个数分布（用于诊断ties问题）:")
+        total_queries = len(self.samples)
+        for unique_count in sorted(unique_reward_counts.keys()):
+            count = unique_reward_counts[unique_count]
+            pct = count / total_queries * 100 if total_queries > 0 else 0
+            print(f"  {unique_count}个不同reward值: {count}个query ({pct:.1f}%)")
+            if unique_count == 1:
+                print(f"    ⚠️  这些query对学习无贡献（所有beam reward相同）")
+        
+        # 【统计4】Reward健康度验证（max - min分布）
+        if reward_range_stats:
+            zero_range_count = sum(1 for r in reward_range_stats if r == 0)
+            positive_range_count = sum(1 for r in reward_range_stats if r > 0)
+            avg_range = sum(reward_range_stats) / len(reward_range_stats) if reward_range_stats else 0
+            print(f"\n[REWARD健康度] Reward信号健康度（max - min分布）:")
+            print(f"  max - min = 0的query数: {zero_range_count} ({zero_range_count/len(reward_range_stats)*100:.1f}%)")
+            print(f"  max - min > 0的query数: {positive_range_count} ({positive_range_count/len(reward_range_stats)*100:.1f}%)")
+            print(f"  平均reward范围: {avg_range:.4f}")
+            if zero_range_count / len(reward_range_stats) > 0.5:
+                print(f"  ⚠️  警告：超过50%的query reward范围=0，可能影响学习效果")
+            else:
+                print(f"  ✓ Reward信号总体健康（多数query有区分度）")
+        
+        print(f"\n✓ RLBeamDatasetWithEmbedding 初始化完成")
         print(f"  - 样本数: {len(self.samples)}")
         print(f"  - query_embeddings: {query_embeddings.shape}")
         print(f"  - candidate_embeddings: {candidate_embeddings.shape}")
@@ -577,26 +661,98 @@ class RLBeamDatasetWithEmbedding(Dataset):
         """
         sample = self.samples[index]
         query_id = sample["query_id"]
-        beam_labels = sample["beam_labels"]
+        beam_labels_raw = sample["beam_labels"]  # 可能是局部索引或全局索引
         beam_rewards = sample["beam_rewards"]
         beam_logprobs = sample.get("beam_logprobs")
+        use_local_indices = sample.get("use_local_indices", False)  # 是否已经是局部索引
         
         # 获取query embedding
         query_emb = self.query_embeddings[query_id]  # [d]
         
-        # 获取所有candidate的embedding
-        cand_emb = self.candidate_embeddings  # [K, d]
+        # 【关键修改】支持per-query候选池：为每个query提取它自己的候选embedding
+        if self.use_per_query_candidate_pool:
+            # 使用per-query候选池
+            query_candidate_indices = sample["candidate_indices"]
+            cand_emb = self.img_emb_data[query_candidate_indices]  # [K_query, d]
+            
+            if use_local_indices:
+                # 【新格式】beam_labels 已经是局部索引 [0, 63]，直接使用
+                beam_labels = beam_labels_raw
+            else:
+                # 【旧格式】beam_labels 是全局索引，需要映射到局部索引
+                # 构建该query的candidate索引映射（global ID -> position in query's candidate pool）
+                query_cand_idx_to_pos = {idx: pos for pos, idx in enumerate(query_candidate_indices)}
+                
+                # 将beam_labels从global ID映射到该query的候选池位置
+                beam_labels = []
+                for pointer_global in beam_labels_raw:
+                    mapped_pointer = []
+                    for idx_global in pointer_global:
+                        if idx_global not in query_cand_idx_to_pos:
+                            # 如果global ID不在该query的候选池中，跳过这个pointer
+                            # 这不应该发生，但如果发生，我们需要处理
+                            raise KeyError(
+                                f"[RLBeamDatasetWithEmbedding] Pointer index {idx_global} not in query {query_id}'s candidate pool "
+                                f"(candidate_indices范围: {min(query_candidate_indices) if query_candidate_indices else 'N/A'}-{max(query_candidate_indices) if query_candidate_indices else 'N/A'})"
+                            )
+                        mapped_pointer.append(query_cand_idx_to_pos[idx_global])
+                    beam_labels.append(mapped_pointer)
+        else:
+            # 使用共享候选池（向后兼容）
+            cand_emb = self.candidate_embeddings  # [K, d]
+            # 将beam_labels从global ID映射到共享候选池位置
+            beam_labels = []
+            for pointer_global in beam_labels_raw:
+                mapped_pointer = []
+                for idx_global in pointer_global:
+                    if idx_global not in self.cand_idx_to_pos:
+                        raise KeyError(
+                            f"[RLBeamDatasetWithEmbedding] Pointer index {idx_global} not in candidate_indices "
+                            f"(query_id={query_id}, candidate_indices范围: {min(self.cand_idx_to_pos.keys()) if self.cand_idx_to_pos else 'N/A'}-{max(self.cand_idx_to_pos.keys()) if self.cand_idx_to_pos else 'N/A'})"
+                        )
+                    mapped_pointer.append(self.cand_idx_to_pos[idx_global])
+                beam_labels.append(mapped_pointer)
         
         # 转换为tensor
         beam_labels_tensor = torch.tensor(beam_labels, dtype=torch.long)  # [num_candidates, shot_num]
         beam_rewards_raw = torch.tensor(beam_rewards, dtype=torch.float32)  # [num_candidates]
         
-        # 归一化（组内Z-score）
-        beam_rewards_normalized = beam_rewards_raw.clone()
-        mean = beam_rewards_raw.mean()
-        std = beam_rewards_raw.std()
-        if std > 1e-12:
-            beam_rewards_normalized = (beam_rewards_raw - mean) / std
+        # 归一化（支持多种方法）
+        if self.normalize_rewards:
+            if self.normalize_method == "z_score":
+                # 标准Z-score归一化
+                mean = beam_rewards_raw.mean()
+                std = beam_rewards_raw.std()
+                if std > 1e-12:
+                    beam_rewards_normalized = (beam_rewards_raw - mean) / std
+                else:
+                    beam_rewards_normalized = beam_rewards_raw.clone()
+            elif self.normalize_method == "z_score_clamp":
+                # Z-score归一化 + Clamp（避免极端值）
+                mean = beam_rewards_raw.mean()
+                std = beam_rewards_raw.std()
+                if std > 1e-12:
+                    beam_rewards_normalized = (beam_rewards_raw - mean) / std
+                    beam_rewards_normalized = torch.clamp(beam_rewards_normalized, -self.normalize_clamp_value, self.normalize_clamp_value)
+                else:
+                    beam_rewards_normalized = beam_rewards_raw.clone()
+            elif self.normalize_method == "rank_normalize":
+                # Rank归一化（按排名给分，避免std太小时爆放大）
+                # 将reward转换为排名，然后归一化到[-1, 1]
+                sorted_rewards, indices = torch.sort(beam_rewards_raw, descending=True)
+                ranks = torch.zeros_like(beam_rewards_raw)
+                for i, idx in enumerate(indices):
+                    ranks[idx] = i
+                # 归一化到[-1, 1]：rank=0 -> 1, rank=max -> -1
+                num_beams = len(beam_rewards_raw)
+                if num_beams > 1:
+                    beam_rewards_normalized = 1.0 - 2.0 * ranks / (num_beams - 1)
+                else:
+                    beam_rewards_normalized = torch.zeros_like(beam_rewards_raw)
+            else:
+                raise ValueError(f"Unknown normalize_method: {self.normalize_method}")
+        else:
+            beam_rewards_normalized = beam_rewards_raw.clone()
         
         result = {
             "query_id": query_id,

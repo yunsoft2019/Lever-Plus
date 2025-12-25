@@ -404,16 +404,52 @@ def build_vqa_prompt_and_generate(
     
     # 后处理得到 answer
     prediction = generated[0] if generated else ""
-    model_name = interface.__class__.__name__.lower()
-    if "qwen" in model_name:
-        answer = vqa_postprocess(prediction, model_name="qwen2.5_vl_3B")
-    elif "flamingo" in model_name:
-        answer = vqa_postprocess(prediction, model_name="flamingo_3B")
-    else:
-        answer = prediction.strip()
+    # 确保prediction是字符串（严格检查）
+    if prediction is None:
+        prediction = ""
+    if not isinstance(prediction, str):
+        try:
+            prediction = str(prediction) if prediction is not None else ""
+        except Exception:
+            prediction = ""
+    # 再次确保prediction不是None且是字符串
+    if prediction is None or not isinstance(prediction, str):
+        prediction = ""
     
-    # 获取原始生成结果（postprocess前）
-    raw_generation = prediction
+    model_name = interface.__class__.__name__.lower()
+    try:
+        if "qwen" in model_name:
+            answer = vqa_postprocess(prediction, model_name="qwen2.5_vl_3B")
+            if answer is None or not isinstance(answer, str):
+                answer = ""
+        elif "flamingo" in model_name:
+            answer = vqa_postprocess(prediction, model_name="flamingo_3B")
+            if answer is None or not isinstance(answer, str):
+                answer = ""
+        else:
+            # 确保prediction是字符串后再调用strip
+            if prediction and isinstance(prediction, str):
+                answer = prediction.strip()
+            else:
+                answer = ""
+    except Exception as e:
+        # 如果后处理失败，使用原始prediction（确保安全）
+        print(f"Warning: vqa_postprocess failed: {e}, using raw prediction")
+        if prediction and isinstance(prediction, str):
+            answer = prediction.strip()
+        else:
+            answer = ""
+    
+    # 确保answer是字符串
+    if answer is None:
+        answer = ""
+    if not isinstance(answer, str):
+        answer = str(answer) if answer is not None else ""
+    
+    # 获取原始生成结果（postprocess前），确保是字符串
+    raw_generation = prediction if prediction is not None else ""
+    if not isinstance(raw_generation, str):
+        raw_generation = str(raw_generation) if raw_generation is not None else ""
     
     # 获取prompt文本（可选）
     prompt_text = None
@@ -609,15 +645,18 @@ def compute_vqa_accuracy(
         used_file_metric: bool（是否使用了文件方式计算）
     """
     # 处理 ground_truth_answers：如果是字典列表，提取 answer 字段
-    if ground_truth_answers and isinstance(ground_truth_answers[0], dict):
+    if not ground_truth_answers or len(ground_truth_answers) == 0:
+        # 空列表：返回空列表
+        gt_answers_str = []
+    elif isinstance(ground_truth_answers[0], dict):
         # 字典格式：提取 "answer" 字段
         gt_answers_str = [ans.get("answer", "") if isinstance(ans, dict) else str(ans) 
                          for ans in ground_truth_answers]
-    elif ground_truth_answers and isinstance(ground_truth_answers[0], str):
+    elif isinstance(ground_truth_answers[0], str):
         # 字符串格式：直接使用
         gt_answers_str = ground_truth_answers
     else:
-        # 空列表或其他格式：转换为字符串列表
+        # 其他格式：转换为字符串列表
         gt_answers_str = [str(ans) for ans in ground_truth_answers] if ground_truth_answers else []
     
     # 如果提供了文件路径，使用文件方式计算（更准确）
@@ -703,8 +742,13 @@ def compute_vqa_accuracy(
             print(f"警告：使用文件方式计算准确率失败，回退到简单匹配: {e}")
     
     # 简单匹配方式：检查预测答案是否在标准答案列表中（不区分大小写）
+    # 确保 pred_answer 是字符串
+    if pred_answer is None:
+        pred_answer = ""
+    if not isinstance(pred_answer, str):
+        pred_answer = str(pred_answer)
     pred_answer_lower = pred_answer.lower().strip()
-    gt_answers_lower = [ans.lower().strip() for ans in gt_answers_str]
+    gt_answers_lower = [ans.lower().strip() if ans else "" for ans in gt_answers_str]
     
     # 精确匹配
     if pred_answer_lower in gt_answers_lower:
