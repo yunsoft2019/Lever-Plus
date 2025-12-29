@@ -9,9 +9,14 @@ Pointer Selector V2: Bi-Encoder + Cross-Attention 指针选择器
 - 每步 masked softmax（屏蔽已选）
 - 损失：交叉熵 + label smoothing
 
+V4-1 升级（2025-12-25）：
+- 新增 query 状态更新机制：选完一个 demo 后更新 query_state
+- 让多步选择变成条件概率链：p(a1|q) p(a2|q,a1) ...
+- 解决 shot≥3 时冗余选择导致正确率下降的问题
+
 作者: Lever-Plus Team
 日期: 2025-10-27
-参考: yiyun.md V2 部分
+参考: yiyun.md V2 部分, Lever-Plus_PointerSelector_Upgrade_Plans_Keep_RCE_GRPO.md
 """
 
 import torch
@@ -105,6 +110,11 @@ class PointerSelectorV2(nn.Module):
         # Dropout 层（强力正则化）
         self.dropout = nn.Dropout(dropout)
         
+        # 【V4-1 新增】Query 状态更新机制
+        # 可学习的融合权重（向量 gate，比标量更强）
+        # 让每一步的打分依赖已选历史，实现条件概率链
+        self.query_update_gate = nn.Linear(hidden_dim * 2, hidden_dim)
+        
         # 温度参数（用于控制 softmax 的尖锐度）
         # 归一化后的余弦相似度范围是[-1, 1]
         # 使用0.1，使softmax更尖锐，增强区分度
@@ -125,7 +135,8 @@ class PointerSelectorV2(nn.Module):
         print(f"  - num_layers: {num_layers} (多层 Cross-Attention)")
         print(f"  - temperature: 0.1 (增强区分度，加速学习)")
         print(f"  - residual_connection: ✓ (稳定训练)")
-        print(f"  - 架构: CLIP {d_model} → proj → {hidden_dim} + {num_layers}层 Cross-Attention")
+        print(f"  - query_state_update: ✓ (V4-1: history-aware 多步选择)")
+        print(f"  - 架构: CLIP {d_model} → proj → {hidden_dim} + {num_layers}层 Cross-Attention + Query状态更新")
     
     def _init_weights(self):
         """初始化模型权重"""
@@ -141,6 +152,11 @@ class PointerSelectorV2(nn.Module):
         with torch.no_grad():
             self.query_proj.weight.add_(torch.randn_like(self.query_proj.weight) * 0.01)
             self.cand_proj.weight.add_(torch.randn_like(self.cand_proj.weight) * 0.01)
+        
+        # 【V4-1】初始化 query_update_gate
+        # 使用 Xavier 初始化，bias 初始化为 0（初始时 gate ≈ 0.5）
+        nn.init.xavier_uniform_(self.query_update_gate.weight)
+        nn.init.zeros_(self.query_update_gate.bias)
     
     def forward(
         self,
@@ -194,17 +210,17 @@ class PointerSelectorV2(nn.Module):
         
         query_enhanced = query_for_attn.squeeze(1)  # [B, 256]
         
-        # 步骤3：投影层（128 -> 128）
-        query_proj = self.query_proj(query_enhanced)  # [B, 128]
-        cand_proj = self.cand_proj(cand_reduced)      # [B, K, 128]
-        
         # 步骤4：Dropout（训练时随机失活）
-        query_proj = self.dropout(query_proj)
-        cand_proj = self.dropout(cand_proj)
+        query_proj = self.dropout(query_enhanced)
+        cand_proj_out = self.dropout(cand_reduced)
         
-        # 步骤5：L2 归一化（确保余弦相似度在[-1, 1]范围内）
-        query_proj = F.normalize(query_proj, p=2, dim=-1)
-        cand_proj = F.normalize(cand_proj, p=2, dim=-1)
+        # 步骤5：投影层
+        query_proj = self.query_proj(query_proj)  # [B, hidden_dim]
+        cand_proj_out = self.cand_proj(cand_proj_out)  # [B, K, hidden_dim]
+        
+        # 步骤6：L2 归一化（确保余弦相似度在[-1, 1]范围内）
+        query_state = F.normalize(query_proj, p=2, dim=-1)  # [B, hidden_dim] - 初始 query 状态
+        cand_proj_norm = F.normalize(cand_proj_out, p=2, dim=-1)  # [B, K, hidden_dim]
         
         # 存储每步的 logits 和预测
         all_logits = []
@@ -216,8 +232,9 @@ class PointerSelectorV2(nn.Module):
         
         # 自回归生成 shot_num 步
         for step in range(self.shot_num):
-            # 计算注意力分数：query @ cand^T
-            scores = torch.matmul(query_proj.unsqueeze(1), cand_proj.transpose(1, 2))  # [B, 1, K]
+            # 【V4-1 核心改动】用"当前 query_state"打分（不再是静态 query）
+            # 计算注意力分数：query_state @ cand^T
+            scores = torch.matmul(query_state.unsqueeze(1), cand_proj_norm.transpose(1, 2))  # [B, 1, K]
             # 温度缩放（确保temperature在正确的设备上）
             temperature = self.temperature.to(device)
             scores = scores.squeeze(1) / temperature  # [B, K]
@@ -233,16 +250,29 @@ class PointerSelectorV2(nn.Module):
             pred = scores.argmax(dim=-1)  # [B]
             predictions.append(pred)
             
-            # 更新 mask（训练时使用真实标签，推理时使用预测）
+            # 确定本步使用的索引（训练用 label，推理用 pred）
             if labels is not None and step < labels.shape[1]:
-                # 训练模式：使用真实标签更新 mask（Teacher Forcing）
-                true_indices = labels[:, step]  # [B]
-                # 使用非 in-place 操作，避免梯度计算错误
-                selected_mask = selected_mask.scatter(1, true_indices.unsqueeze(1), True)
+                # 训练模式：使用真实标签（Teacher Forcing）
+                idx = labels[:, step]  # [B]
             else:
-                # 推理模式：使用预测更新 mask
-                # 使用非 in-place 操作，避免梯度计算错误
-                selected_mask = selected_mask.scatter(1, pred.unsqueeze(1), True)
+                # 推理模式：使用预测
+                idx = pred
+            
+            # 更新 mask（使用非 in-place 操作，避免梯度计算错误）
+            selected_mask = selected_mask.scatter(1, idx.unsqueeze(1), True)
+            
+            # 【V4-1 核心改动】取出被选 demo 的 embedding 并更新 query_state
+            # 这让后续 step 的打分条件化于已选历史
+            chosen = cand_proj_norm.gather(
+                1, idx.view(batch_size, 1, 1).expand(-1, 1, self.hidden_dim)
+            ).squeeze(1)  # [B, hidden_dim]
+            
+            # 向量 gate：学习如何融合当前状态和已选 demo
+            gate_input = torch.cat([query_state, chosen], dim=-1)  # [B, hidden_dim*2]
+            gate = torch.sigmoid(self.query_update_gate(gate_input))  # [B, hidden_dim]
+            
+            # 更新 query_state：gate 控制保留多少原始信息 vs 融入多少已选信息
+            query_state = F.normalize(gate * query_state + (1 - gate) * chosen, p=2, dim=-1)
         
         # 堆叠结果
         all_logits = torch.stack(all_logits, dim=1)  # [B, S, K]

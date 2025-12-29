@@ -532,6 +532,8 @@ class PointerSelectorAdapter(nn.Module):
         device,
         icd_image_field,
         icd_text_field,
+        precomputed_index_emb=None,  # 预计算的训练集 embedding [N, d_model]
+        disable_stop=False,  # 禁用 STOP 机制
     ):
         """
         适配 v0 推理流程的 generation 方法
@@ -545,6 +547,7 @@ class PointerSelectorAdapter(nn.Module):
             device: 设备
             icd_image_field: ICD 图像字段名
             icd_text_field: ICD 文本字段名
+            precomputed_index_emb: 预计算的训练集 embedding（可选）
         
         Returns:
             icd_seq_idx: List[List[int]] 格式为 [BOS, QUERY_TOKEN, idx1, idx2, ..., idxN]
@@ -554,17 +557,143 @@ class PointerSelectorAdapter(nn.Module):
         # 提取 query embedding
         query_emb = self._extract_query_emb(query_input)  # [B, d_model]
         
-        # 构建候选池：使用整个训练集作为候选池
-        # 注意：v1 模型的 K 参数限制了候选池大小，但推理时我们需要从整个训练集中选择
-        # 因此，我们临时将 K 设置为训练集大小（但受限于模型的实际 K 参数）
-        # 实际上，我们需要分批处理候选池，或者使用整个训练集
-        
         # 获取训练集大小和模型的实际 K
         dataset_size = len(index_ds)
         model_K = self.pointer_selector.K
         
-        # 如果训练集大小 <= 模型 K，直接使用整个训练集
-        # 否则，使用前 K 个样本（这是一个简化，实际应用中可能需要更智能的选择）
+        # 【修复】使用 CLIP 相似度从整个训练集中预筛选 Top-K 候选
+        if precomputed_index_emb is not None and dataset_size > model_K:
+            # 使用预计算的 embedding 进行 Top-K 筛选
+            # query_emb: [B, d_model], precomputed_index_emb: [N, d_model]
+            query_emb_norm = torch.nn.functional.normalize(query_emb, p=2, dim=-1)
+            index_emb_norm = torch.nn.functional.normalize(precomputed_index_emb.to(device), p=2, dim=-1)
+            
+            # 计算相似度 [B, N]
+            similarity = torch.mm(query_emb_norm, index_emb_norm.t())
+            
+            # 获取每个 query 的 Top-K 候选索引 [B, K]
+            _, topk_indices = similarity.topk(model_K, dim=-1)
+            
+            # 为每个 batch 构建不同的候选池
+            candidate_indices_per_batch = topk_indices.cpu().tolist()
+            K_to_use = model_K
+            
+            # 需要为每个 batch 单独处理
+            all_results = []
+            for b in range(batch_size):
+                candidate_indices = candidate_indices_per_batch[b]
+                
+                # 提取该 batch 的候选
+                icd_text_list = []
+                icd_img_list = []
+                for idx in candidate_indices:
+                    if "text" in self.icd_encoding_flag:
+                        icd_text_list.append(index_ds[idx][icd_text_field])
+                    if "image" in self.icd_encoding_flag:
+                        icd_img_list.append(index_ds[idx][icd_image_field])
+                
+                # 编码候选
+                cand_input = processor(
+                    text=icd_text_list if icd_text_list else None,
+                    images=icd_img_list if icd_img_list else None,
+                    padding=True,
+                    return_tensors="pt",
+                ).to(device)
+                
+                # 构建候选输入字典
+                cand_input_dict = {}
+                for k in cand_input:
+                    if k == "pixel_values" and "image" in self.icd_encoding_flag:
+                        cand_input_dict[k] = cand_input[k].unsqueeze(0)  # [1, K, C, H, W]
+                    elif k in ["input_ids", "attention_mask"] and "text" in self.icd_encoding_flag:
+                        cand_input_dict[k] = cand_input[k].unsqueeze(0)  # [1, K, seq_len]
+                
+                # 提取候选 embeddings
+                original_K = self.K
+                self.K = K_to_use
+                try:
+                    cand_emb = self._extract_cand_emb(cand_input_dict)  # [1, K, d_model]
+                finally:
+                    self.K = original_K
+                
+                # 调用模型
+                original_model_K = self.pointer_selector.K
+                original_shot_num = self.pointer_selector.shot_num
+                self.pointer_selector.K = K_to_use
+                self.pointer_selector.shot_num = shot_num
+                
+                try:
+                    output = self.pointer_selector(
+                        query_emb=query_emb[b:b+1],  # [1, d_model]
+                        cand_emb=cand_emb,
+                        labels=None,
+                        return_loss=False
+                    )
+                finally:
+                    self.pointer_selector.shot_num = original_shot_num
+                    self.pointer_selector.K = original_model_K
+                
+                # 调试信息（只打印第一个 batch）
+                if b == 0 and 'debug_stop_scores' in output and not hasattr(self, '_debug_printed'):
+                    self._debug_printed = True
+                    print(f"\n{'='*60}")
+                    print(f"[DEBUG] V4-10 STOP 分数分析 (shot_num={shot_num}):")
+                    for info in output['debug_stop_scores']:
+                        status = "⚠️ STOP更高" if info['stop_higher'] else "✓ 候选更高"
+                        print(f"  Step {info['step']}: STOP={info['stop_score']:.3f}, MaxCand={info['max_cand_score']:.3f} {status}")
+                    print(f"{'='*60}\n")
+                
+                # 处理预测结果
+                predictions = output['predictions']  # [1, shot_num]
+                has_stop_token = hasattr(self.pointer_selector, 'stop_token') and not disable_stop
+                stop_idx = K_to_use if has_stop_token else -1
+                
+                batch_predictions = predictions[0].cpu().tolist()
+                batch_actual_indices = []
+                selected_local_indices = set()  # 记录已选择的本地索引
+                for step_idx, pred_idx in enumerate(batch_predictions):
+                    if has_stop_token and pred_idx == stop_idx:
+                        break
+                    # 如果禁用 STOP，跳过 STOP 索引，选择次优候选
+                    if disable_stop and pred_idx == K_to_use:
+                        # 从 logits 中找到次优候选
+                        logits = output['logits'][0]  # [shot_num, K+1]
+                        if step_idx < logits.shape[0]:
+                            step_logits = logits[step_idx].clone()
+                            step_logits[K_to_use] = -100.0  # mask STOP
+                            # mask 已选择的候选
+                            for local_idx in selected_local_indices:
+                                step_logits[local_idx] = -100.0
+                            pred_idx = step_logits.argmax().item()
+                    
+                    if pred_idx < len(candidate_indices) and pred_idx not in selected_local_indices:
+                        batch_actual_indices.append(candidate_indices[pred_idx])
+                        selected_local_indices.add(pred_idx)
+                    elif pred_idx in selected_local_indices:
+                        # 如果选择了已选过的候选，找下一个最优的
+                        logits = output['logits'][0]
+                        if step_idx < logits.shape[0]:
+                            step_logits = logits[step_idx].clone()
+                            step_logits[K_to_use] = -100.0  # mask STOP
+                            for local_idx in selected_local_indices:
+                                step_logits[local_idx] = -100.0
+                            new_pred_idx = step_logits.argmax().item()
+                            if new_pred_idx < len(candidate_indices) and step_logits[new_pred_idx] > -100.0:
+                                batch_actual_indices.append(candidate_indices[new_pred_idx])
+                                selected_local_indices.add(new_pred_idx)
+                    else:
+                        break
+                
+                if len(batch_actual_indices) == 0:
+                    batch_actual_indices = [candidate_indices[0]]
+                
+                bos_token_id = init_icd_idx[0, 0].item()
+                query_token_id = init_icd_idx[0, 1].item()
+                all_results.append([bos_token_id, query_token_id] + batch_actual_indices)
+            
+            return all_results
+        
+        # 【原有逻辑】如果没有预计算的 embedding，使用前 K 个样本
         K_to_use = min(model_K, dataset_size)
         candidate_indices = list(range(K_to_use))
         
@@ -631,8 +760,23 @@ class PointerSelectorAdapter(nn.Module):
             self.pointer_selector.shot_num = original_shot_num
             self.pointer_selector.K = original_model_K
         
+        # 调试：打印 STOP 分数信息（只打印第一个 batch）
+        if 'debug_stop_scores' in output and not hasattr(self, '_debug_printed'):
+            self._debug_printed = True
+            print(f"\n{'='*60}")
+            print(f"[DEBUG] V4-10 STOP 分数分析 (shot_num={shot_num}):")
+            for info in output['debug_stop_scores']:
+                status = "⚠️ STOP更高" if info['stop_higher'] else "✓ 候选更高"
+                print(f"  Step {info['step']}: STOP={info['stop_score']:.3f}, MaxCand={info['max_cand_score']:.3f} {status}")
+            print(f"{'='*60}\n")
+        
         # 获取预测的候选索引（0 到 K_to_use-1）
         predictions = output['predictions']  # [B, shot_num]
+        
+        # 检查是否是 V4-10 模型（有 STOP token）
+        # V4-10 的 logits 维度是 K+1，STOP 索引是 K
+        has_stop_token = hasattr(self.pointer_selector, 'stop_token') and not disable_stop
+        stop_idx = K_to_use if has_stop_token else -1  # STOP 索引
         
         # 将候选索引（0 到 K_to_use-1）转换为训练集中的实际索引
         # candidate_indices 是候选池在训练集中的索引列表
@@ -640,7 +784,47 @@ class PointerSelectorAdapter(nn.Module):
         for b in range(batch_size):
             batch_predictions = predictions[b].cpu().tolist()  # [shot_num]
             # 将候选索引映射到训练集中的实际索引
-            batch_actual_indices = [candidate_indices[pred_idx] for pred_idx in batch_predictions]
+            # 对于 V4-10，如果选择了 STOP，则停止添加后续索引
+            batch_actual_indices = []
+            selected_local_indices = set()  # 记录已选择的本地索引
+            for step_idx, pred_idx in enumerate(batch_predictions):
+                if has_stop_token and pred_idx == stop_idx:
+                    # 选择了 STOP，停止添加
+                    break
+                # 如果禁用 STOP，跳过 STOP 索引，选择次优候选
+                if disable_stop and pred_idx == K_to_use:
+                    logits = output['logits'][b]  # [shot_num, K+1]
+                    if step_idx < logits.shape[0]:
+                        step_logits = logits[step_idx].clone()
+                        step_logits[K_to_use] = -100.0  # mask STOP
+                        for local_idx in selected_local_indices:
+                            step_logits[local_idx] = -100.0
+                        pred_idx = step_logits.argmax().item()
+                
+                if pred_idx < len(candidate_indices) and pred_idx not in selected_local_indices:
+                    batch_actual_indices.append(candidate_indices[pred_idx])
+                    selected_local_indices.add(pred_idx)
+                elif pred_idx in selected_local_indices:
+                    # 如果选择了已选过的候选，找下一个最优的
+                    logits = output['logits'][b]
+                    if step_idx < logits.shape[0]:
+                        step_logits = logits[step_idx].clone()
+                        step_logits[K_to_use] = -100.0  # mask STOP
+                        for local_idx in selected_local_indices:
+                            step_logits[local_idx] = -100.0
+                        new_pred_idx = step_logits.argmax().item()
+                        if new_pred_idx < len(candidate_indices) and step_logits[new_pred_idx] > -100.0:
+                            batch_actual_indices.append(candidate_indices[new_pred_idx])
+                            selected_local_indices.add(new_pred_idx)
+                else:
+                    # 索引越界，跳过（不应该发生，但作为安全措施）
+                    logger.warning(f"预测索引 {pred_idx} 超出候选池大小 {len(candidate_indices)}")
+                    break
+            
+            # 如果没有选择任何有效候选（全部是 STOP），至少选择第一个候选
+            if len(batch_actual_indices) == 0:
+                batch_actual_indices = [candidate_indices[0]]
+            
             actual_indices.append(batch_actual_indices)
         
         # 构建返回的 icd_seq_idx

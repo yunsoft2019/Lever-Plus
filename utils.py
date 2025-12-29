@@ -436,8 +436,14 @@ def init_lever_lm(cfg, lever_lm_path):
         lever_lm_path.endswith(".pt") and ("grpo" in lever_lm_path or "rce" in lever_lm_path)
     )
     
+    # 检查是否是 V4-x 转换后的格式（_v2format.ckpt）
+    is_v4_converted = "_v2format.ckpt" in lever_lm_path
+    
+    # 检查环境变量中的模型类型
+    model_type = os.environ.get("LEVER_LM_MODEL_TYPE", None)
+    
     if is_v3_checkpoint:
-        # v3 GRPO checkpoint 使用特殊的加载方式
+        # v3 GRPO checkpoint（.pt 格式）使用特殊的加载方式
         logger.info(f"检测到 v3 GRPO checkpoint，使用 v3 加载方式: {lever_lm_path}")
         from lever_lm.models.v3 import load_v3_from_grpo_checkpoint
         from lever_lm.models.adapter import PointerSelectorAdapter
@@ -501,14 +507,532 @@ def init_lever_lm(cfg, lever_lm_path):
         processor = AutoProcessor.from_pretrained(clip_name)
         return lever_lm, processor
     
+    # V4-7 原生模式：直接加载 .pt 文件，保留完整 DPP 机制
+    if model_type == "v4_7_native":
+        logger.info(f"检测到 V4-7 原生模式，直接加载 .pt 文件: {lever_lm_path}")
+        
+        from lever_lm.models.adapter import PointerSelectorAdapter
+        from lever_lm.models.v3.pointer_selector_v4_7_rl import PointerSelectorV4_7_RL
+        
+        # 获取设备
+        device = cfg.device if hasattr(cfg, 'device') and cfg.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(device, str):
+            device = torch.device(device)
+        
+        # 加载 checkpoint
+        checkpoint = torch.load(lever_lm_path, map_location=device, weights_only=False)
+        
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
+        
+        # 从 state_dict 推断模型配置
+        hidden_dim = 256
+        d_model = 512
+        dpp_rank = int(os.environ.get("LEVER_LM_DPP_RANK", 32))
+        
+        for key in state_dict.keys():
+            if "query_proj.weight" in key:
+                hidden_dim = state_dict[key].shape[0]
+            if "input_proj.weight" in key:
+                d_model = state_dict[key].shape[1]
+            if "dpp_proj.weight" in key:
+                dpp_rank = state_dict[key].shape[0]
+        
+        use_step_emb = any("step_emb" in k for k in state_dict.keys())
+        use_gru = any("decoder_gru" in k for k in state_dict.keys())
+        
+        logger.info(f"V4-7 原生模型配置: d_model={d_model}, hidden_dim={hidden_dim}, dpp_rank={dpp_rank}")
+        logger.info(f"  use_step_emb={use_step_emb}, use_gru={use_gru}")
+        
+        # 创建模型
+        pointer_selector = PointerSelectorV4_7_RL(
+            d_model=d_model,
+            hidden_dim=hidden_dim,
+            num_layers=1,
+            use_step_emb=use_step_emb,
+            use_gru=use_gru,
+            dpp_rank=dpp_rank,
+            dpp_lambda_init=-2.0,
+            label_smoothing=0.0,
+            dropout=0.0  # 推理时关闭 dropout
+        )
+        
+        # 加载权重
+        missing, unexpected = pointer_selector.load_state_dict(state_dict, strict=False)
+        if missing:
+            logger.warning(f"缺失参数: {len(missing)} 个")
+            for k in missing[:5]:
+                logger.warning(f"  - {k}")
+        
+        pointer_selector = pointer_selector.to(device)
+        pointer_selector.eval()
+        
+        # 打印 DPP lambda 值
+        dpp_lambda_effective = torch.nn.functional.softplus(pointer_selector.dpp_lambda).item()
+        logger.info(f"DPP Lambda (effective): {dpp_lambda_effective:.4f}")
+        logger.info(f"✓ V4-7 原生模型加载完成，参数量: {sum(p.numel() for p in pointer_selector.parameters()):,}")
+        
+        # 创建 adapter
+        clip_name = cfg.train.lever_lm.clip_name
+        query_encoding_flag = cfg.train.lever_lm.query_encoding_flag
+        icd_encoding_flag = cfg.train.lever_lm.icd_encoding_flag
+        adapter = cfg.train.lever_lm.adapter
+        norm = cfg.train.lever_lm.norm
+        K = cfg.train.lever_lm.config.K
+        
+        lever_lm = PointerSelectorAdapter(
+            pointer_selector=pointer_selector,
+            clip_name=clip_name,
+            query_encoding_flag=query_encoding_flag,
+            icd_encoding_flag=icd_encoding_flag,
+            adapter=adapter,
+            norm=norm,
+            K=K,
+            device=device
+        )
+        
+        processor = AutoProcessor.from_pretrained(clip_name)
+        return lever_lm, processor
+    
+    # V4-x 转换后的格式（_v2format.ckpt）需要特殊处理
+    if is_v4_converted or model_type in ["v4_2", "v4_3", "v4_4", "v4_5", "v4_6", "v4_7", "v4_8"]:
+        logger.info(f"检测到 V4-x 转换后的 checkpoint，使用 V4-x 加载方式: {lever_lm_path}")
+        logger.info(f"模型类型: {model_type}")
+        
+        from lever_lm.models.adapter import PointerSelectorAdapter
+        
+        # 获取设备
+        device = cfg.device if hasattr(cfg, 'device') and cfg.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(device, str):
+            device = torch.device(device)
+        
+        # 加载转换后的 checkpoint
+        checkpoint = torch.load(lever_lm_path, map_location=device, weights_only=False)
+        
+        # 获取 state_dict（支持多种格式）
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        else:
+            state_dict = checkpoint
+        
+        # 去掉前缀
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            new_key = k
+            if new_key.startswith("lever_lm."):
+                new_key = new_key[len("lever_lm."):]
+            if new_key.startswith("pointer_selector."):
+                new_key = new_key[len("pointer_selector."):]
+            new_state_dict[new_key] = v
+        
+        # 从 checkpoint 或环境变量获取模型类型
+        ckpt_model_type = checkpoint.get("model_type", None)
+        if ckpt_model_type:
+            model_type = ckpt_model_type
+        
+        # 自动检测模型类型（如果没有指定）
+        if model_type is None:
+            has_topic_prototypes = any("topic_prototypes" in k for k in new_state_dict.keys())
+            has_cover_lambda = any("cover_lambda" in k for k in new_state_dict.keys())
+            has_dpp_proj = any("dpp_proj" in k for k in new_state_dict.keys())
+            has_dpp_lambda = any("dpp_lambda" in k for k in new_state_dict.keys())
+            has_cand_encoder = any("cand_encoder" in k for k in new_state_dict.keys())
+            has_additive_attn = any("attn_Wq" in k or "attn_Wc" in k or "attn_v" in k for k in new_state_dict.keys())
+            has_bilinear_attn = any("bilinear" in k for k in new_state_dict.keys())
+            has_div_lambda = any("div_lambda" in k for k in new_state_dict.keys())
+            has_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            has_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            has_slot_emb = any("slot_emb" in k for k in new_state_dict.keys())
+            has_slot_self_attn = any("slot_self_attn" in k for k in new_state_dict.keys())
+            # V4-9 特有参数
+            has_refine_attn = any("refine_attn" in k for k in new_state_dict.keys())
+            has_refine_mlp = any("refine_mlp" in k for k in new_state_dict.keys())
+            # V4-10 特有参数
+            has_stop_token = any("stop_token" in k for k in new_state_dict.keys())
+            
+            if has_stop_token:
+                model_type = "v4_10"
+            elif has_refine_attn or has_refine_mlp:
+                model_type = "v4_9"
+            elif has_slot_emb or has_slot_self_attn:
+                model_type = "v4_8"
+            elif has_dpp_proj or has_dpp_lambda:
+                model_type = "v4_7"
+            elif has_topic_prototypes or has_cover_lambda:
+                model_type = "v4_6"
+            elif has_cand_encoder:
+                model_type = "v4_4"
+            elif has_additive_attn or has_bilinear_attn:
+                model_type = "v4_5"
+            elif has_div_lambda:
+                model_type = "v4_3"
+            elif has_gru or has_step_emb:
+                model_type = "v4_2"
+            else:
+                model_type = "v2"  # 默认
+        
+        # 处理转换后的模型类型
+        if model_type == "v4_7_converted_to_v2":
+            model_type = "v4_7"
+        
+        logger.info(f"检测到模型类型: {model_type}")
+        
+        # 从 state_dict 推断模型配置
+        hidden_dim = 256
+        d_model = 512  # CLIP ViT-L/14 输出
+        num_layers = 1
+        
+        for key in new_state_dict.keys():
+            if "query_proj.weight" in key:
+                hidden_dim = new_state_dict[key].shape[0]
+            if "input_proj.weight" in key:
+                d_model = new_state_dict[key].shape[1]
+            if "cross_attn_layers" in key:
+                layer_idx = int(key.split(".")[1])
+                num_layers = max(num_layers, layer_idx + 1)
+        
+        # 检测 V4-6 特有参数
+        num_topics = checkpoint.get("num_topics", 16)
+        env_num_topics = os.environ.get("LEVER_LM_NUM_TOPICS", None)
+        if env_num_topics:
+            num_topics = int(env_num_topics)
+        
+        # 从 state_dict 检测 num_topics
+        for key in new_state_dict.keys():
+            if "topic_prototypes" in key:
+                num_topics = new_state_dict[key].shape[0]
+                break
+        
+        logger.info(f"推断模型配置: d_model={d_model}, hidden_dim={hidden_dim}, num_layers={num_layers}")
+        
+        # 创建对应的模型
+        if model_type == "v4_10":
+            from lever_lm.models.v3.pointer_selector_v4_10_rl import PointerSelectorV4_10_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            
+            # 检测 shot_num（从 step_emb 推断）
+            ckpt_shot_num = 2  # 默认值
+            if "step_emb.weight" in new_state_dict:
+                ckpt_shot_num = new_state_dict["step_emb.weight"].shape[0]
+            
+            # 推理时需要支持更多 shot，所以使用 max_shot_num=8
+            max_shot_num = 8
+            
+            # 先扩展 step_emb（在创建模型之前）
+            if "step_emb.weight" in new_state_dict and ckpt_shot_num < max_shot_num:
+                old_step_emb = new_state_dict["step_emb.weight"]
+                logger.info(f"V4-10: 扩展 step_emb: {ckpt_shot_num} -> {max_shot_num}")
+                new_step_emb = torch.randn(max_shot_num, old_step_emb.shape[1]) * 0.02
+                new_step_emb[:ckpt_shot_num] = old_step_emb
+                new_state_dict["step_emb.weight"] = new_step_emb
+            
+            pointer_selector = PointerSelectorV4_10_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                shot_num=max_shot_num,  # 使用扩展后的 shot_num
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                label_smoothing=0.0,
+                dropout=0.0  # 推理时关闭 dropout
+            )
+            logger.info(f"创建 V4-10 模型 (STOP 自适应 shot, shot_num={max_shot_num})")
+        elif model_type == "v4_9":
+            from lever_lm.models.v3.pointer_selector_v4_9_rl import PointerSelectorV4_9_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            
+            # 检测 top_m
+            top_m = checkpoint.get("top_m", 8)
+            env_top_m = os.environ.get("LEVER_LM_TOP_M", None)
+            if env_top_m:
+                top_m = int(env_top_m)
+            
+            # 检测 refine_type
+            has_refine_attn = any("refine_attn" in k for k in new_state_dict.keys())
+            has_refine_mlp = any("refine_mlp" in k for k in new_state_dict.keys())
+            refine_type = "attn" if has_refine_attn else ("mlp" if has_refine_mlp else "attn")
+            
+            # 检测 shot_num（从 step_emb 推断）
+            # 注意：这里使用 checkpoint 中的实际 shot_num，后面会扩展 step_emb
+            ckpt_shot_num = 2  # 默认值
+            if "step_emb.weight" in new_state_dict:
+                ckpt_shot_num = new_state_dict["step_emb.weight"].shape[0]
+            
+            # 推理时需要支持更多 shot，所以使用 max_shot_num=8
+            max_shot_num = 8
+            
+            # 先扩展 step_emb（在创建模型之前）
+            if "step_emb.weight" in new_state_dict and ckpt_shot_num < max_shot_num:
+                old_step_emb = new_state_dict["step_emb.weight"]
+                logger.info(f"V4-9: 扩展 step_emb: {ckpt_shot_num} -> {max_shot_num}")
+                new_step_emb = torch.randn(max_shot_num, old_step_emb.shape[1]) * 0.02
+                new_step_emb[:ckpt_shot_num] = old_step_emb
+                new_state_dict["step_emb.weight"] = new_step_emb
+            
+            pointer_selector = PointerSelectorV4_9_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                shot_num=max_shot_num,  # 使用扩展后的 shot_num
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                top_m=top_m,
+                refine_type=refine_type,
+                label_smoothing=0.0,
+                dropout=0.0  # 推理时关闭 dropout
+            )
+            logger.info(f"创建 V4-9 模型 (Two-Stage TopM={top_m}, refine={refine_type}, shot_num={max_shot_num})")
+        elif model_type == "v4_8":
+            from lever_lm.models.v3.pointer_selector_v4_8_rl import PointerSelectorV4_8_RL
+            
+            # 检测 num_slot_layers
+            num_slot_layers = 2
+            for key in new_state_dict.keys():
+                if "slot_self_attn_layers" in key:
+                    layer_idx = int(key.split(".")[1])
+                    num_slot_layers = max(num_slot_layers, layer_idx + 1)
+            
+            # 检测是否使用 slot_cand_attn
+            use_slot_cand_attn = any("slot_cand_attn" in k for k in new_state_dict.keys())
+            
+            pointer_selector = PointerSelectorV4_8_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                num_slot_layers=num_slot_layers,
+                use_slot_cand_attn=use_slot_cand_attn,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-8 模型 (Slot Decoder {num_slot_layers} layers, slot_cand_attn={use_slot_cand_attn})")
+        elif model_type == "v4_7":
+            from lever_lm.models.v3.pointer_selector_v4_7_rl import PointerSelectorV4_7_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            
+            # 检测 dpp_rank
+            dpp_rank = checkpoint.get("dpp_rank", 32)
+            env_dpp_rank = os.environ.get("LEVER_LM_DPP_RANK", None)
+            if env_dpp_rank:
+                dpp_rank = int(env_dpp_rank)
+            
+            # 从 state_dict 检测 dpp_rank
+            for key in new_state_dict.keys():
+                if "dpp_proj.weight" in key:
+                    dpp_rank = new_state_dict[key].shape[0]
+                    break
+            
+            pointer_selector = PointerSelectorV4_7_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                dpp_rank=dpp_rank,
+                dpp_lambda_init=-2.0,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-7 模型 (GRU + DPP rank={dpp_rank})")
+        elif model_type == "v4_6":
+            from lever_lm.models.v3.pointer_selector_v4_6_rl import PointerSelectorV4_6_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            
+            pointer_selector = PointerSelectorV4_6_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                num_topics=num_topics,
+                cover_lambda_init=-2.0,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-6 模型 (GRU + Coverage {num_topics} topics)")
+        elif model_type == "v4_5":
+            from lever_lm.models.v3.pointer_selector_v4_5_rl import PointerSelectorV4_5_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            has_additive_attn = any("attn_Wq" in k for k in new_state_dict.keys())
+            attention_type = 'additive' if has_additive_attn else 'bilinear'
+            
+            pointer_selector = PointerSelectorV4_5_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                attention_type=attention_type,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-5 模型 (GRU + {attention_type.upper()} Attention)")
+        elif model_type == "v4_4":
+            from lever_lm.models.v3.pointer_selector_v4_4_rl import PointerSelectorV4_4_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            
+            pointer_selector = PointerSelectorV4_4_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-4 模型 (Cand Encoder + GRU + MMR)")
+        elif model_type == "v4_3":
+            from lever_lm.models.v3.pointer_selector_v4_3_rl import PointerSelectorV4_3_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            use_gru = any("decoder_gru" in k for k in new_state_dict.keys())
+            
+            pointer_selector = PointerSelectorV4_3_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                use_step_emb=use_step_emb,
+                use_gru=use_gru,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-3 模型 (GRU + MMR)")
+        elif model_type == "v4_2":
+            from lever_lm.models.v3 import PointerSelectorV4_2_RL
+            
+            use_step_emb = any("step_emb" in k for k in new_state_dict.keys())
+            
+            pointer_selector = PointerSelectorV4_2_RL(
+                d_model=d_model,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                use_step_emb=use_step_emb,
+                label_smoothing=0.0,
+                dropout=0.5
+            )
+            logger.info(f"创建 V4-2 模型 (GRU Pointer Decoder)")
+        else:
+            # 默认使用 V2
+            logger.warning(f"未知模型类型 {model_type}，使用默认 V2 加载方式")
+            # 继续使用下面的标准加载流程
+            pass
+        
+        if model_type and model_type.startswith("v4"):
+            # 处理 step_emb 大小不匹配问题
+            # 训练时 shot_num=2，但推理时可能需要更大的 shot_num（如 shot 4）
+            # 需要扩展 step_emb 以支持更多 shot
+            # 注意：V4-9 已经在上面处理过了，这里跳过
+            max_shot_num = 8  # 支持最多 8 shot
+            if model_type != "v4_9" and "step_emb.weight" in new_state_dict:
+                old_step_emb = new_state_dict["step_emb.weight"]
+                old_num_steps = old_step_emb.shape[0]
+                
+                if old_num_steps < max_shot_num:
+                    logger.info(f"扩展 step_emb: {old_num_steps} -> {max_shot_num}")
+                    # 创建新的 step_emb，前面的部分使用旧的权重，后面的部分使用随机初始化
+                    new_step_emb = torch.randn(max_shot_num, old_step_emb.shape[1]) * 0.02
+                    new_step_emb[:old_num_steps] = old_step_emb
+                    new_state_dict["step_emb.weight"] = new_step_emb
+                    
+                    # 同时更新模型的 step_emb 大小
+                    if hasattr(pointer_selector, 'step_emb'):
+                        pointer_selector.step_emb = torch.nn.Embedding(max_shot_num, old_step_emb.shape[1])
+                        pointer_selector.shot_num = max_shot_num
+            
+            # 加载权重
+            missing, unexpected = pointer_selector.load_state_dict(new_state_dict, strict=False)
+            if missing:
+                logger.warning(f"缺失参数: {len(missing)} 个")
+                for k in missing[:5]:
+                    logger.warning(f"  - {k}")
+            if unexpected:
+                logger.warning(f"多余参数: {len(unexpected)} 个")
+                for k in unexpected[:5]:
+                    logger.warning(f"  - {k}")
+            
+            pointer_selector = pointer_selector.to(device)
+            pointer_selector.eval()
+            
+            logger.info(f"✓ V4-x 模型加载完成，参数量: {sum(p.numel() for p in pointer_selector.parameters()):,}")
+            
+            # 获取配置参数
+            clip_name = cfg.train.lever_lm.clip_name
+            
+            # 从配置中获取 encoding flags
+            query_encoding_flag = cfg.train.lever_lm.get('query_encoding_flag', ['image', 'text'])
+            if isinstance(query_encoding_flag, (list, tuple)) and len(query_encoding_flag) > 0:
+                pass
+            else:
+                query_encoding_flag = []
+                if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('query_image_field'):
+                    query_encoding_flag.append('image')
+                if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('query_text_field'):
+                    query_encoding_flag.append('text')
+                if not query_encoding_flag:
+                    query_encoding_flag = ['image', 'text']
+            
+            icd_encoding_flag = cfg.train.lever_lm.get('icd_encoding_flag', ['image', 'text'])
+            if isinstance(icd_encoding_flag, (list, tuple)) and len(icd_encoding_flag) > 0:
+                pass
+            else:
+                icd_encoding_flag = []
+                if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('icd_image_field'):
+                    icd_encoding_flag.append('image')
+                if hasattr(cfg.train, 'lever_lm_ds') and cfg.train.lever_lm_ds.get('icd_text_field'):
+                    icd_encoding_flag.append('text')
+                if not icd_encoding_flag:
+                    icd_encoding_flag = ['image', 'text']
+            
+            adapter = cfg.train.lever_lm.get('adapter', False)
+            norm = cfg.train.lever_lm.get('norm', True)
+            K = pointer_selector.K
+            
+            # 包装为 PointerSelectorAdapter
+            lever_lm = PointerSelectorAdapter(
+                pointer_selector_model=pointer_selector,
+                clip_name=clip_name,
+                query_encoding_flag=query_encoding_flag,
+                icd_encoding_flag=icd_encoding_flag,
+                adapter=adapter,
+                norm=norm,
+                K=K,
+                device=device
+            )
+            
+            processor = AutoProcessor.from_pretrained(clip_name)
+            return lever_lm, processor
+    
     # v0, v1, v2, v2_lora 使用 PyTorch Lightning 格式的 checkpoint
     # PyTorch 2.6+ 默认 weights_only=True，需要设置为 False 来加载包含 omegaconf 对象的检查点
     checkpoint = torch.load(lever_lm_path, weights_only=False)
     
+    # 检查 checkpoint 格式：可能是 PyTorch Lightning 格式（有 state_dict 键）或直接的 state_dict
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+        hyper_parameters = checkpoint.get("hyper_parameters", {})
+    else:
+        # 直接是 state_dict（V4-x 转换后的格式）
+        state_dict = checkpoint
+        hyper_parameters = {}
+    
     # 从检查点中读取保存的超参数，特别是 index_ds_size
     # 这样可以确保模型大小与检查点匹配
     saved_index_ds_size = None
-    hyper_parameters = checkpoint.get("hyper_parameters", {})
     if "cfg" in hyper_parameters:
         saved_cfg = hyper_parameters["cfg"]
         # 如果检查点中有保存的 dataset.train_ds_len，使用它来设置 index_ds_size
@@ -518,7 +1042,6 @@ def init_lever_lm(cfg, lever_lm_path):
     
     # 如果从超参数中没有读取到，尝试从权重形状推断
     if saved_index_ds_size is None:
-        state_dict = checkpoint["state_dict"]
         # 查找 lm_model.transformer.wte.weight 或 lever_lm.lm_model.transformer.wte.weight
         wte_key = None
         for key in state_dict.keys():
@@ -565,7 +1088,9 @@ def init_lever_lm(cfg, lever_lm_path):
             logger.info(f"v0 模型不支持 device 参数，将在模型加载后移动到设备 {cfg.device}")
     
     lever_lm = hydra.utils.instantiate(cfg.train.lever_lm, **instantiate_kwargs)
-    state_dict = checkpoint["state_dict"]
+    
+    # 如果 state_dict 还没有提取（PyTorch Lightning 格式已经在上面提取了）
+    # 这里不需要再次提取
     state_dict = {k.replace("lever_lm.", ""): v for k, v in state_dict.items()}
     
     # 检查是否有缺失的键（用于兼容旧检查点）

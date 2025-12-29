@@ -121,6 +121,10 @@ def init_retriever(retriever_name, ds, cfg):
     elif retriever_name == "LeverLMRetriever":
         lever_lm_path = get_lever_lm_path(cfg)
         lever_lm, processor = init_lever_lm(cfg, lever_lm_path=lever_lm_path)
+        # 检查是否禁用 STOP 机制（通过配置或环境变量）
+        disable_stop = getattr(cfg, 'disable_stop', False) or os.environ.get('DISABLE_STOP', '').lower() == 'true'
+        if disable_stop:
+            logger.info("⚠️ STOP 机制已禁用，模型将强制选择指定数量的 shot")
         return LeverLMRetriever(
             ds["train"],
             ds["validation"],
@@ -134,6 +138,7 @@ def init_retriever(retriever_name, ds, cfg):
             infer_batch_size=cfg.lever_lm_bs,
             infer_num_workers=cfg.lever_lm_num_workers,
             reverse_seq=cfg.reverse_seq,
+            disable_stop=disable_stop,
         )
 
     return None

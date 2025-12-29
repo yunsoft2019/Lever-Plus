@@ -56,6 +56,11 @@ def convert_v3_to_v2_format(v3_ckpt_path: str, output_path: str):
         
         v2_state[new_key] = v
     
+    # 【V4-1】检查是否包含 query_update_gate 参数
+    has_v4_1 = any('query_update_gate' in k for k in v2_state.keys())
+    if has_v4_1:
+        print("\n✓ 检测到 V4-1 参数 (query_update_gate)")
+    
     print(f"\n转换后 v2 参数数量: {len(v2_state)}")
     print("v2 参数名:")
     for k in v2_state.keys():
