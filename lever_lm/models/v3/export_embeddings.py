@@ -225,23 +225,48 @@ def main():
         # 创建默认配置（用于加载数据集）
         # 根据数据集名称推断任务类型和配置
         dataset_name = args.dataset.lower()
-        if "okvqa" in dataset_name or "vqa" in dataset_name:
+        
+        # 获取项目根目录
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        default_train_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "train2014")
+        default_val_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "val2014")
+        train_coco_root = os.getenv("COCO_TRAIN_ROOT", default_train_coco_root)
+        val_coco_root = os.getenv("COCO_VAL_ROOT", default_val_coco_root)
+        
+        if "vqav2" in dataset_name:
+            # VQAv2 数据集
             task_name = "vqa"
-            # 获取项目根目录
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            vqav2_dir = os.path.join(project_root, "datasets", "vqav2")
+            vqav2_hf_dir = os.path.join(vqav2_dir, "vqav2_hf")
+            default_train_path = os.path.join(vqav2_hf_dir, "vqav2_mscoco_train2014.json")
+            default_val_path = os.path.join(vqav2_hf_dir, "vqav2_mscoco_val2014.json")
             
-            # 设置默认路径（与 generate_rl_data.py 一致）
+            train_path = os.getenv("VQAV2_TRAIN_PATH", default_train_path)
+            val_path = os.getenv("VQAV2_VAL_PATH", default_val_path)
+            
+            cfg = OmegaConf.create({
+                "dataset": {
+                    "name": args.dataset,
+                    "version": "local",
+                    "train_path": train_path,
+                    "val_path": val_path,
+                    "train_coco_dataset_root": train_coco_root,
+                    "val_coco_dataset_root": val_coco_root,
+                },
+                "task": {
+                    "task_name": task_name,
+                },
+            })
+        elif "okvqa" in dataset_name:
+            # OKVQA 数据集
+            task_name = "vqa"
             okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
             okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
             default_train_path = os.path.join(okvqa_hf_dir, "vqav2_mscoco_train2014.json")
             default_val_path = os.path.join(okvqa_hf_dir, "vqav2_mscoco_val2014.json")
-            default_train_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "train2014")
-            default_val_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "val2014")
             
             train_path = os.getenv("OKVQA_TRAIN_PATH", default_train_path)
             val_path = os.getenv("OKVQA_VAL_PATH", default_val_path)
-            train_coco_root = os.getenv("COCO_TRAIN_ROOT", default_train_coco_root)
-            val_coco_root = os.getenv("COCO_VAL_ROOT", default_val_coco_root)
             
             cfg = OmegaConf.create({
                 "dataset": {

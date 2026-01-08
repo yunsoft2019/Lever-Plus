@@ -61,61 +61,6 @@ class LeverLMRetriever(BaseRetriever):
         self.reverse_seq = reverse_seq
         self.disable_stop = disable_stop  # 新增：禁用 STOP 机制
         self._cached_query_inputs = None  # 缓存预处理后的查询数据
-        self._cached_index_emb = None  # 缓存训练集的 embedding
-
-    def _prepare_index_embeddings(self):
-        """预计算训练集的 embedding，用于 Top-K 预筛选"""
-        if self._cached_index_emb is not None:
-            return self._cached_index_emb
-        
-        # 检查模型是否支持预计算 embedding
-        if not hasattr(self.lever_lm, '_extract_query_emb'):
-            print("[INFO] 模型不支持预计算 embedding，跳过 Top-K 预筛选")
-            return None
-        
-        print(f"[INFO] 预计算训练集 embedding ({len(self.index_ds)} 样本)...")
-        
-        # 准备训练集数据
-        index_ds_ = self.index_ds.map()
-        
-        def prepare(examples):
-            images = texts = None
-            if self.icd_image_field:
-                images = [i for i in examples[self.icd_image_field]]
-            if self.icd_text_field:
-                texts = [i for i in examples[self.icd_text_field]]
-            
-            data_dict = self.processor(
-                images=images,
-                text=texts,
-                padding=True,
-                return_tensors="pt",
-            )
-            return data_dict
-        
-        index_ds_.set_transform(prepare)
-        dataloader = DataLoader(
-            index_ds_,
-            batch_size=32,  # 使用较大的 batch size 加速
-            shuffle=False,
-            num_workers=0,
-        )
-        
-        all_embeddings = []
-        self.lever_lm = self.lever_lm.to(self.device)
-        self.lever_lm.eval()
-        
-        with torch.inference_mode():
-            for batch in tqdm(dataloader, desc="Computing index embeddings", ncols=100):
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                # 使用模型的 _extract_query_emb 方法提取 embedding
-                emb = self.lever_lm._extract_query_emb(batch)  # [B, d_model]
-                all_embeddings.append(emb.cpu())
-        
-        self._cached_index_emb = torch.cat(all_embeddings, dim=0)  # [N, d_model]
-        print(f"[INFO] 训练集 embedding 计算完成: {self._cached_index_emb.shape}")
-        
-        return self._cached_index_emb
 
     def _prepare_query_inputs(self):
         """一次性准备并缓存所有查询输入数据"""
@@ -184,9 +129,6 @@ class LeverLMRetriever(BaseRetriever):
         if hasattr(self.lever_lm, '_debug_printed'):
             delattr(self.lever_lm, '_debug_printed')
         
-        # 预计算训练集 embedding（用于 Top-K 预筛选）
-        precomputed_index_emb = self._prepare_index_embeddings()
-        
         icd_idx_list = []
         bos_token_id = len(self.index_ds) + 1
         query_token_id = len(self.index_ds) + 2
@@ -213,7 +155,6 @@ class LeverLMRetriever(BaseRetriever):
                 icd_image_field=self.icd_image_field,
                 icd_text_field=self.icd_text_field,
                 device=self.device,
-                precomputed_index_emb=precomputed_index_emb,  # 传递预计算的 embedding
                 disable_stop=self.disable_stop,  # 传递禁用 STOP 标志
             )
             

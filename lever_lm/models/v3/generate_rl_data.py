@@ -434,7 +434,6 @@ def build_vqa_prompt_and_generate(
                 answer = ""
     except Exception as e:
         # 如果后处理失败，使用原始prediction（确保安全）
-        print(f"Warning: vqa_postprocess failed: {e}, using raw prediction")
         if prediction and isinstance(prediction, str):
             answer = prediction.strip()
         else:
@@ -739,7 +738,7 @@ def compute_vqa_accuracy(
                     if os.path.exists(temp_result_file):
                         os.remove(temp_result_file)
         except Exception as e:
-            print(f"警告：使用文件方式计算准确率失败，回退到简单匹配: {e}")
+            pass  # 静默回退到简单匹配
     
     # 简单匹配方式：检查预测答案是否在标准答案列表中（不区分大小写）
     # 确保 pred_answer 是字符串
@@ -784,7 +783,11 @@ def generate_rl_data(
     train_ques_path: Optional[str] = None,
     train_ann_path: Optional[str] = None,
     strict_eval: bool = True,  # 严格模式：禁用fallback
-    save_prompts: bool = False  # 是否保存prompt文本
+    save_prompts: bool = False,  # 是否保存prompt文本
+    start_idx: int = 0,  # 分片起始索引
+    end_idx: int = -1,  # 分片结束索引（-1 表示全部）
+    output_path: Optional[str] = None,  # 输出路径（用于断点续传）
+    save_interval: int = 50,  # 保存间隔
 ) -> Dict:
     """
     生成完整的 RL 数据
@@ -805,6 +808,10 @@ def generate_rl_data(
         generation_kwargs: VQA 生成参数（可选）
         val_ques_path: 验证集问题文件路径（可选，用于准确率计算）
         val_ann_path: 验证集标注文件路径（可选，用于准确率计算）
+        start_idx: 分片起始索引（用于多 GPU 并行）
+        end_idx: 分片结束索引（-1 表示全部）
+        output_path: 输出路径（用于断点续传）
+        save_interval: 保存间隔
     
     Returns:
         rl_data: 新的 RL 数据格式
@@ -812,7 +819,20 @@ def generate_rl_data(
     if device is None:
         device = next(sft_model.parameters()).device
     
+    # 断点续传：加载已有数据
     rl_data = {}
+    completed_queries = set()
+    if output_path and os.path.exists(output_path):
+        try:
+            print(f"发现已有输出文件，加载断点: {output_path}")
+            with open(output_path, "r") as f:
+                existing_data = json.load(f)
+            # 过滤掉 _meta 键
+            rl_data = {k: v for k, v in existing_data.items() if not k.startswith("_")}
+            completed_queries = set(rl_data.keys())
+            print(f"✓ 已加载 {len(completed_queries)} 个已完成的 query")
+        except Exception as e:
+            print(f"警告：加载断点失败: {e}，将从头开始")
     
     # 构建 candidate 索引映射
     cand_idx_to_pos = {idx: pos for pos, idx in enumerate(candidate_indices)}
@@ -830,10 +850,42 @@ def generate_rl_data(
         candidate_embeddings = candidate_embeddings.to(device)
     print("✓ Embeddings已预加载到device")
     
-    # 优化2: 预构建candidate_pool（避免每个query重复构建）
-    print("优化：预构建candidate_pool...")
-    candidate_pool = [dataset[idx] for idx in candidate_indices]
-    print(f"✓ Candidate pool已预构建（{len(candidate_pool)}个候选）")
+    # 优化2: 使用按需加载的candidate_pool（避免内存爆炸）
+    # 对于大数据集（如VQAv2有443k候选），预加载所有候选会导致内存不足
+    # 改为按需加载：只在需要时才从dataset中获取
+    print(f"优化：使用按需加载的candidate_pool（共{len(candidate_indices)}个候选）...")
+    
+    class LazyDatasetPool:
+        """按需加载的数据集池，避免预加载所有候选导致内存爆炸"""
+        def __init__(self, dataset, indices):
+            self.dataset = dataset
+            self.indices = indices
+            self._cache = {}  # 简单的LRU缓存
+            self._cache_max_size = 1000  # 最多缓存1000个样本
+        
+        def __getitem__(self, pos):
+            """按position获取候选，pos是在indices中的位置"""
+            if pos in self._cache:
+                return self._cache[pos]
+            
+            # 从dataset加载
+            global_idx = self.indices[pos]
+            item = self.dataset[global_idx]
+            
+            # 缓存（简单的FIFO策略）
+            if len(self._cache) >= self._cache_max_size:
+                # 删除最早的一个
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+            self._cache[pos] = item
+            
+            return item
+        
+        def __len__(self):
+            return len(self.indices)
+    
+    candidate_pool = LazyDatasetPool(dataset, candidate_indices)
+    print(f"✓ Candidate pool已初始化（按需加载模式，共{len(candidate_pool)}个候选）")
     
     # 优化：预先加载 VQA 对象（只加载一次，避免重复加载）
     vqa_train_cache = None
@@ -854,8 +906,18 @@ def generate_rl_data(
         except Exception as e:
             print(f"警告：预加载验证集 VQA 对象失败: {e}")
     
+    # 分片处理
+    all_query_ids = list(beam_data.keys())
+    if end_idx == -1:
+        end_idx = len(all_query_ids)
+    query_ids_to_process = all_query_ids[start_idx:end_idx]
+    
     print(f"开始生成 RL 数据...")
-    print(f"  - Query 数量: {len(beam_data)}")
+    print(f"  - 总 Query 数: {len(all_query_ids)}")
+    print(f"  - 分片范围: {start_idx} - {end_idx}")
+    print(f"  - 本次处理: {len(query_ids_to_process)} 个 query")
+    print(f"  - 已完成: {len(completed_queries)} 个 query")
+    print(f"  - 待处理: {len(query_ids_to_process) - len(completed_queries & set(query_ids_to_process))} 个 query")
     print(f"  - Beam 数量: {num_beams}")
     print(f"  - 温度: {temps}")
     print(f"  - 每个温度采样数: {num_samples_per_temp}")
@@ -871,7 +933,13 @@ def generate_rl_data(
                 "Please provide at least one of: (train_ques_path, train_ann_path) or (val_ques_path, val_ann_path)"
             )
     
-    for query_id_str, query_data in tqdm(beam_data.items(), desc="生成 RL 数据"):
+    processed_count = 0
+    for query_id_str in tqdm(query_ids_to_process, desc="生成 RL 数据"):
+        # 断点续传：跳过已完成的 query
+        if query_id_str in completed_queries:
+            continue
+        
+        query_data = beam_data[query_id_str]
         query_id = int(query_id_str)
         
         # 优化1: embeddings已在device上，直接使用（不需要.to(device)）
@@ -1097,6 +1165,25 @@ def generate_rl_data(
             },
             "pointer_candidates": pointer_candidates_with_correctness
         }
+        
+        # 定期保存（断点续传）
+        processed_count += 1
+        if output_path and processed_count % save_interval == 0:
+            try:
+                with open(output_path, "w") as f:
+                    json.dump(rl_data, f, indent=2)
+                print(f"  [checkpoint] 已保存 {len(rl_data)} 个 query 到 {output_path}")
+            except Exception as e:
+                print(f"  [checkpoint] 保存失败: {e}")
+    
+    # 最终保存
+    if output_path:
+        try:
+            with open(output_path, "w") as f:
+                json.dump(rl_data, f, indent=2)
+            print(f"  [final] 已保存 {len(rl_data)} 个 query 到 {output_path}")
+        except Exception as e:
+            print(f"  [final] 保存失败: {e}")
     
     # 打印统计信息
     print(f"\n✓ RL 数据生成完成！")
@@ -1139,6 +1226,9 @@ def main():
     parser.add_argument("--strict_eval", action="store_true", default=True, help="严格模式：禁用fallback，必须使用官方VQA评测文件")
     parser.add_argument("--no_strict_eval", dest="strict_eval", action="store_false", help="禁用严格模式（允许fallback）")
     parser.add_argument("--save_prompts", action="store_true", default=False, help="是否保存prompt文本（会增加文件大小）")
+    # 分片参数（用于多 GPU 并行）
+    parser.add_argument("--start_idx", type=int, default=0, help="起始 query 索引（用于分片）")
+    parser.add_argument("--end_idx", type=int, default=-1, help="结束 query 索引（-1 表示全部，用于分片）")
     
     args = parser.parse_args()
     
@@ -1198,36 +1288,59 @@ def main():
             # 获取项目根目录（假设脚本在 lever_lm/models/v3/ 目录下）
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
             
-            # 设置默认路径（基于项目根目录，使用实际的数据集路径）
-            # 根据 configs/dataset/okvqa_local.yaml 中的配置：
-            # train_path: ${oc.env:OKVQA_PATH}/okvqa_hf/vqav2_mscoco_train2014.json
-            # val_path: ${oc.env:OKVQA_PATH}/okvqa_hf/vqav2_mscoco_val2014.json
-            okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
-            okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
-            # 使用与训练时相同的文件名
-            default_train_path = os.path.join(okvqa_hf_dir, "vqav2_mscoco_train2014.json")
-            default_val_path = os.path.join(okvqa_hf_dir, "vqav2_mscoco_val2014.json")
-            default_train_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "train2014")
-            default_val_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "val2014")
-            
-            train_path = args.train_path or os.getenv("OKVQA_TRAIN_PATH", default_train_path)
-            val_path = args.val_path or os.getenv("OKVQA_VAL_PATH", default_val_path)
-            train_coco_root = args.train_coco_root or os.getenv("COCO_TRAIN_ROOT", default_train_coco_root)
-            val_coco_root = args.val_coco_root or os.getenv("COCO_VAL_ROOT", default_val_coco_root)
+            # 根据数据集名称选择正确的路径
+            if "vqav2" in dataset_name:
+                # VQAv2 数据集路径
+                # 根据 configs/dataset/vqav2_local.yaml 中的配置
+                vqav2_dir = os.path.join(project_root, "datasets", "vqav2")
+                vqav2_hf_dir = os.path.join(vqav2_dir, "vqav2_hf")
+                default_train_path = os.path.join(vqav2_hf_dir, "vqav2_mscoco_train2014.json")
+                default_val_path = os.path.join(vqav2_hf_dir, "vqav2_mscoco_val2014.json")
+                default_train_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "train2014")
+                default_val_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "val2014")
+                
+                train_path = args.train_path or os.getenv("VQAV2_TRAIN_PATH", default_train_path)
+                val_path = args.val_path or os.getenv("VQAV2_VAL_PATH", default_val_path)
+                train_coco_root = args.train_coco_root or os.getenv("COCO_TRAIN_ROOT", default_train_coco_root)
+                val_coco_root = args.val_coco_root or os.getenv("COCO_VAL_ROOT", default_val_coco_root)
+            else:
+                # OKVQA 数据集路径（默认）
+                # 根据 configs/dataset/okvqa_local.yaml 中的配置
+                okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
+                okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
+                default_train_path = os.path.join(okvqa_hf_dir, "vqav2_mscoco_train2014.json")
+                default_val_path = os.path.join(okvqa_hf_dir, "vqav2_mscoco_val2014.json")
+                default_train_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "train2014")
+                default_val_coco_root = os.path.join(project_root, "datasets", "mscoco", "mscoco2014", "val2014")
+                
+                train_path = args.train_path or os.getenv("OKVQA_TRAIN_PATH", default_train_path)
+                val_path = args.val_path or os.getenv("OKVQA_VAL_PATH", default_val_path)
+                train_coco_root = args.train_coco_root or os.getenv("COCO_TRAIN_ROOT", default_train_coco_root)
+                val_coco_root = args.val_coco_root or os.getenv("COCO_VAL_ROOT", default_val_coco_root)
             
             # 如果默认路径不存在，尝试查找其他可能的文件名和位置
             if not os.path.exists(train_path) and not args.train_path:
-                # 尝试查找常见的文件名（包括不同目录）
-                possible_train_files = [
-                    # 优先使用与配置文件一致的路径
-                    os.path.join(okvqa_hf_dir, "vqav2_mscoco_train2014.json"),
-                    os.path.join(okvqa_dir, "okvqa_hf", "vqav2_mscoco_train2014.json"),
-                    # 其他可能的文件名
-                    os.path.join(okvqa_dir, "train.json"),
-                    os.path.join(okvqa_dir, "train_annotations.json"),
-                    os.path.join(okvqa_dir, "mscoco_train2014_annotations.json"),
-                    os.path.join(okvqa_dir, "OpenEnded_mscoco_train2014_questions.json"),
-                ]
+                if "vqav2" in dataset_name:
+                    # VQAv2 数据集的可能路径
+                    vqav2_dir = os.path.join(project_root, "datasets", "vqav2")
+                    vqav2_hf_dir = os.path.join(vqav2_dir, "vqav2_hf")
+                    possible_train_files = [
+                        os.path.join(vqav2_hf_dir, "vqav2_mscoco_train2014.json"),
+                        os.path.join(vqav2_dir, "vqav2_hf", "vqav2_mscoco_train2014.json"),
+                        os.path.join(vqav2_dir, "train.json"),
+                    ]
+                else:
+                    # OKVQA 数据集的可能路径
+                    okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
+                    okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
+                    possible_train_files = [
+                        os.path.join(okvqa_hf_dir, "vqav2_mscoco_train2014.json"),
+                        os.path.join(okvqa_dir, "okvqa_hf", "vqav2_mscoco_train2014.json"),
+                        os.path.join(okvqa_dir, "train.json"),
+                        os.path.join(okvqa_dir, "train_annotations.json"),
+                        os.path.join(okvqa_dir, "mscoco_train2014_annotations.json"),
+                        os.path.join(okvqa_dir, "OpenEnded_mscoco_train2014_questions.json"),
+                    ]
                 for possible_path in possible_train_files:
                     if os.path.exists(possible_path):
                         train_path = possible_path
@@ -1235,17 +1348,27 @@ def main():
                         break
             
             if not os.path.exists(val_path) and not args.val_path:
-                # 尝试查找常见的文件名（包括不同目录）
-                possible_val_files = [
-                    # 优先使用与配置文件一致的路径
-                    os.path.join(okvqa_hf_dir, "vqav2_mscoco_val2014.json"),
-                    os.path.join(okvqa_dir, "okvqa_hf", "vqav2_mscoco_val2014.json"),
-                    # 其他可能的文件名
-                    os.path.join(okvqa_dir, "val.json"),
-                    os.path.join(okvqa_dir, "val_annotations.json"),
-                    os.path.join(okvqa_dir, "mscoco_val2014_annotations.json"),
-                    os.path.join(okvqa_dir, "OpenEnded_mscoco_val2014_questions.json"),
-                ]
+                if "vqav2" in dataset_name:
+                    # VQAv2 数据集的可能路径
+                    vqav2_dir = os.path.join(project_root, "datasets", "vqav2")
+                    vqav2_hf_dir = os.path.join(vqav2_dir, "vqav2_hf")
+                    possible_val_files = [
+                        os.path.join(vqav2_hf_dir, "vqav2_mscoco_val2014.json"),
+                        os.path.join(vqav2_dir, "vqav2_hf", "vqav2_mscoco_val2014.json"),
+                        os.path.join(vqav2_dir, "val.json"),
+                    ]
+                else:
+                    # OKVQA 数据集的可能路径
+                    okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
+                    okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
+                    possible_val_files = [
+                        os.path.join(okvqa_hf_dir, "vqav2_mscoco_val2014.json"),
+                        os.path.join(okvqa_dir, "okvqa_hf", "vqav2_mscoco_val2014.json"),
+                        os.path.join(okvqa_dir, "val.json"),
+                        os.path.join(okvqa_dir, "val_annotations.json"),
+                        os.path.join(okvqa_dir, "mscoco_val2014_annotations.json"),
+                        os.path.join(okvqa_dir, "OpenEnded_mscoco_val2014_questions.json"),
+                    ]
                 for possible_path in possible_val_files:
                     if os.path.exists(possible_path):
                         val_path = possible_path
@@ -1254,13 +1377,23 @@ def main():
             
             # 检查路径是否存在，如果不存在则给出提示
             if not os.path.exists(train_path):
+                ds_name = "vqav2" if "vqav2" in dataset_name else "okvqa"
+                env_var = "VQAV2_TRAIN_PATH" if "vqav2" in dataset_name else "OKVQA_TRAIN_PATH"
+                config_file = f"configs/dataset/{ds_name}_local.yaml"
                 print(f"错误：训练集文件不存在: {train_path}")
-                print(f"请使用 --train_path 参数指定正确的路径，或设置环境变量 OKVQA_TRAIN_PATH")
-                print(f"根据配置文件 configs/dataset/okvqa_local.yaml，预期路径为：")
+                print(f"请使用 --train_path 参数指定正确的路径，或设置环境变量 {env_var}")
+                print(f"根据配置文件 {config_file}，预期路径为：")
                 print(f"  {default_train_path}")
                 print(f"\n请检查以下目录下的文件：")
                 # 检查多个可能的目录
-                check_dirs = [okvqa_hf_dir, okvqa_dir]
+                if "vqav2" in dataset_name:
+                    vqav2_dir = os.path.join(project_root, "datasets", "vqav2")
+                    vqav2_hf_dir = os.path.join(vqav2_dir, "vqav2_hf")
+                    check_dirs = [vqav2_hf_dir, vqav2_dir]
+                else:
+                    okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
+                    okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
+                    check_dirs = [okvqa_hf_dir, okvqa_dir]
                 for check_dir in check_dirs:
                     if os.path.exists(check_dir):
                         print(f"\n{check_dir} 目录下的文件：")
@@ -1275,13 +1408,23 @@ def main():
                             print(f"  (无法读取目录: {e})")
                 return
             if not os.path.exists(val_path):
+                ds_name = "vqav2" if "vqav2" in dataset_name else "okvqa"
+                env_var = "VQAV2_VAL_PATH" if "vqav2" in dataset_name else "OKVQA_VAL_PATH"
+                config_file = f"configs/dataset/{ds_name}_local.yaml"
                 print(f"错误：验证集文件不存在: {val_path}")
-                print(f"请使用 --val_path 参数指定正确的路径，或设置环境变量 OKVQA_VAL_PATH")
-                print(f"根据配置文件 configs/dataset/okvqa_local.yaml，预期路径为：")
+                print(f"请使用 --val_path 参数指定正确的路径，或设置环境变量 {env_var}")
+                print(f"根据配置文件 {config_file}，预期路径为：")
                 print(f"  {default_val_path}")
                 print(f"\n请检查以下目录下的文件：")
                 # 检查多个可能的目录
-                check_dirs = [okvqa_hf_dir, okvqa_dir]
+                if "vqav2" in dataset_name:
+                    vqav2_dir = os.path.join(project_root, "datasets", "vqav2")
+                    vqav2_hf_dir = os.path.join(vqav2_dir, "vqav2_hf")
+                    check_dirs = [vqav2_hf_dir, vqav2_dir]
+                else:
+                    okvqa_dir = os.path.join(project_root, "datasets", "okvqa")
+                    okvqa_hf_dir = os.path.join(okvqa_dir, "okvqa_hf")
+                    check_dirs = [okvqa_hf_dir, okvqa_dir]
                 for check_dir in check_dirs:
                     if os.path.exists(check_dir):
                         print(f"\n{check_dir} 目录下的文件：")
@@ -1447,7 +1590,11 @@ def main():
         train_ques_path=args.train_ques_path,
         train_ann_path=args.train_ann_path,
         strict_eval=args.strict_eval,
-        save_prompts=args.save_prompts
+        save_prompts=args.save_prompts,
+        start_idx=args.start_idx,
+        end_idx=args.end_idx,
+        output_path=args.output_path,
+        save_interval=50,  # 每 50 个 query 保存一次
     )
     
     # 【改动F】添加_meta信息

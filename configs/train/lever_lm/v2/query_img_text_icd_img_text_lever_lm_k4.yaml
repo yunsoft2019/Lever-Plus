@@ -1,0 +1,22 @@
+_target_: lever_lm.models.v2.adapter_builder.build_model_v2_with_adapter
+
+# PointerSelectorV2Config 参数（传递给 build_model_v2 的 config 参数）
+# K=4, shot_num=4 版本，支持最多 4-shot 推理
+config:
+  _target_: lever_lm.models.v2.pointer_selector_v2.PointerSelectorV2Config
+  d_model: 512 # CLIP base-patch32 outputs 512
+  K: 4         # 候选池大小，支持最多 4-shot
+  shot_num: 4  # 最大 shot 数
+  label_smoothing: 0.0
+  dropout: 0.5
+  hidden_dim: 256
+  num_heads: 1
+  attn_dropout: 0.1
+  num_layers: 1
+
+# 适配器参数
+clip_name: openai/clip-vit-base-patch32
+query_encoding_flag: ['image', 'text']
+icd_encoding_flag: ['image', 'text']
+adapter: false
+norm: true
